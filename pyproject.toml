@@ -1,0 +1,55 @@
+[project]
+name = "enterprise-knowledge-agent-platform"
+version = "0.1.0"
+description = "Enterprise Knowledge Agent Platform — production-grade agentic AI backend"
+authors = [
+    { name = "Umesh", email = "umesh836@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+    "sqlmodel>=0.0.22",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.30.0",
+    "pgvector>=0.3.6",
+    "alembic>=1.14.0",
+    "psycopg[binary]>=3.2.3",
+    "redis>=5.2.0",
+    "langgraph>=0.2.60",
+    "langgraph-checkpoint-postgres>=2.0.13",
+    "openai>=1.57.0",
+    "tenacity>=9.0.0",
+    "structlog>=24.4.0",
+    "pypdf>=5.1.0",
+    "python-multipart>=0.0.17",
+    "tiktoken>=0.8.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.4",
+    "pytest-asyncio>=0.25.0",
+    "httpx>=0.28.1",
+    "ruff>=0.8.4",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
