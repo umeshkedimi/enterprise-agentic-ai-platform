@@ -1,7 +1,7 @@
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import Column, Text
+from sqlalchemy import Column, DateTime, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
@@ -15,8 +15,12 @@ class ChatSession(SQLModel, table=True):
 
     id: str = Field(primary_key=True)  # == session_id from the API
     tenant_id: str = Field(default="default", index=True)
-    created_at: datetime = Field(default_factory=_utcnow)
-    updated_at: datetime = Field(default_factory=_utcnow)
+    created_at: datetime = Field(
+        default_factory=_utcnow, sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
+    updated_at: datetime = Field(
+        default_factory=_utcnow, sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
 
 
 class ChatMessage(SQLModel, table=True):
@@ -30,4 +34,6 @@ class ChatMessage(SQLModel, table=True):
     message_metadata: dict = Field(
         default_factory=dict, sa_column=Column("metadata", JSONB, nullable=False)
     )
-    created_at: datetime = Field(default_factory=_utcnow)
+    created_at: datetime = Field(
+        default_factory=_utcnow, sa_column=Column(DateTime(timezone=True), nullable=False)
+    )

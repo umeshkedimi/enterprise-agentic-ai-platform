@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 from enum import Enum
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Column, ForeignKey, String, Text
+from sqlalchemy import Column, DateTime, ForeignKey, String, Text
 from sqlmodel import Field, SQLModel
 
 EMBEDDING_DIM = 1536
@@ -30,7 +30,9 @@ class Document(SQLModel, table=True):
         default=DocumentStatus.UPLOADED, sa_column=Column(String(20), nullable=False)
     )
     tenant_id: str = Field(default="default", index=True)
-    uploaded_at: datetime = Field(default_factory=_utcnow)
+    uploaded_at: datetime = Field(
+        default_factory=_utcnow, sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
     error_message: str | None = None
 
 
@@ -47,4 +49,6 @@ class DocumentChunk(SQLModel, table=True):
     content: str = Field(sa_column=Column(Text, nullable=False))
     embedding: list[float] = Field(sa_column=Column(Vector(EMBEDDING_DIM), nullable=False))
     token_count: int
-    created_at: datetime = Field(default_factory=_utcnow)
+    created_at: datetime = Field(
+        default_factory=_utcnow, sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
