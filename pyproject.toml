@@ -1,7 +1,7 @@
 [project]
-name = "enterprise-knowledge-agent-platform"
+name = "enterprise-agentic-ai-platform"
 version = "0.1.0"
-description = "Enterprise Knowledge Agent Platform — production-grade agentic AI backend"
+description = "Enterprise Agentic AI Platform — multi-agent platform backend"
 authors = [
     { name = "Umesh", email = "umesh836@gmail.com" }
 ]
@@ -46,6 +46,20 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency-injection idiom deliberately evaluates these in argument
+# defaults; the call result is a marker object, not shared mutable state, so
+# B008 does not apply to them.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.File",
+    "fastapi.Form",
+    "fastapi.Header",
+    "fastapi.Path",
+    "fastapi.Query",
+    "fastapi.Security",
+]
 
 [build-system]
 requires = ["hatchling"]

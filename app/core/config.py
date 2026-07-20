@@ -11,8 +11,8 @@ class Settings(BaseSettings):
     app_port: int = 8000
     log_level: str = "INFO"
 
-    database_url: str = "postgresql+asyncpg://ekap:ekap@localhost:5432/ekap"
-    database_url_sync: str = "postgresql+psycopg://ekap:ekap@localhost:5432/ekap"
+    database_url: str = "postgresql+asyncpg://eaap:eaap@localhost:5432/eaap"
+    database_url_sync: str = "postgresql+psycopg://eaap:eaap@localhost:5432/eaap"
 
     redis_url: str = "redis://localhost:6379/0"
 

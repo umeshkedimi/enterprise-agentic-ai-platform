@@ -2,16 +2,16 @@ services:
   postgres:
     image: pgvector/pgvector:pg16
     environment:
-      POSTGRES_USER: ekap
-      POSTGRES_PASSWORD: ekap
-      POSTGRES_DB: ekap
+      POSTGRES_USER: eaap
+      POSTGRES_PASSWORD: eaap
+      POSTGRES_DB: eaap
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ekap -d ekap"]
+      test: ["CMD-SHELL", "pg_isready -U eaap -d eaap"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -33,8 +33,8 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://ekap:ekap@postgres:5432/ekap
-      DATABASE_URL_SYNC: postgresql+psycopg://ekap:ekap@postgres:5432/ekap
+      DATABASE_URL: postgresql+asyncpg://eaap:eaap@postgres:5432/eaap
+      DATABASE_URL_SYNC: postgresql+psycopg://eaap:eaap@postgres:5432/eaap
       REDIS_URL: redis://redis:6379/0
     ports:
       - "8000:8000"

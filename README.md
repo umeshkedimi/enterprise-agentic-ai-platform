@@ -1,22 +1,47 @@
-# Enterprise Knowledge Agent Platform
+# Enterprise Agentic AI Platform
 
-Production-grade internal enterprise knowledge assistant: retrieval-augmented chat, tool calling,
-and a multi-agent LangGraph workflow, built on FastAPI, PostgreSQL/pgvector, and Redis.
+An internal platform for building, configuring, and operating AI agents across an organisation.
+Rather than each team hand-rolling its own assistant, a team registers an agent configuration —
+prompt, model, tool allowlist, knowledge scope — and the platform supplies the shared runtime:
+retrieval, orchestration, conversation state, streaming, and observability.
 
-> **Status**: Phase 1 (working core) in progress. See `docs/` / commit history for phase scope.
+Built on FastAPI, PostgreSQL/pgvector, and Redis.
+
+## Status
+
+Under active development. This README documents **only what is implemented**; the roadmap below is
+explicitly marked as not-yet-built.
+
+**Implemented**
+
+- Document ingestion pipeline — upload, text extraction (PDF/txt/markdown), token-based chunking,
+  batched embedding with retry, persistence to pgvector.
+- Semantic retrieval — cosine similarity search over chunks, scoped by tenant and document status.
+- FastAPI application — app factory, lifespan-managed resources, request correlation IDs,
+  structured JSON logging, liveness/readiness probes, document CRUD endpoints.
+- Postgres + pgvector and Redis via Docker Compose; Alembic migrations; multi-stage app image.
+
+**Roadmap (not yet implemented)**
+
+Agent configuration domain (agents as first-class, tenant-scoped database entities) · knowledge
+collections · LangGraph orchestration · tool registry and MCP integration · conversation
+persistence and memory · SSE streaming · LiteLLM multi-provider routing · authentication ·
+async ingestion via Celery/RabbitMQ · OpenTelemetry tracing · Kubernetes manifests · CI/CD.
 
 ## Architecture
 
-- **API layer** (`app/api`) — FastAPI routers, request/response DTOs.
-- **Agent layer** (`app/agents`) — LangGraph state graph: Planner → Decision → Retrieval/Tool/Direct
-  → Execution → Critic → Response, implemented as five cooperating agents communicating through
-  shared graph state (`AgentState`).
-- **Tools** (`app/tools`) — schema-validated, retryable, timeout-bounded tool implementations
-  (knowledge search, calculator, current time; more in later phases).
-- **Services** (`app/services`) — document ingestion/chunking/embedding, semantic retrieval,
-  Redis-backed conversation memory.
-- **Models** (`app/models`) — SQLModel tables + Pydantic DTOs.
-- **Core** (`app/core`) — settings, structured logging, LLM provider client factory.
+| Layer | Package | Responsibility |
+|---|---|---|
+| API | `app/api` | FastAPI routers, request/response DTOs, HTTP error mapping |
+| Services | `app/services` | Ingestion, chunking, embedding, retrieval — framework-agnostic |
+| Models | `app/models` | SQLModel tables (persistence) + Pydantic DTOs (transport) |
+| Core | `app/core` | Settings, structured logging, middleware, LLM client factory |
+| DB | `app/db` | Engine, session factory, Alembic metadata target |
+| Agents | `app/agents` | *(empty — LangGraph orchestration, roadmap)* |
+| Tools | `app/tools` | *(empty — tool registry and MCP, roadmap)* |
+
+Services never import from `app/api`, so the same logic is reachable from an HTTP handler, a
+background worker, or a test without dragging in the web framework.
 
 ## Requirements
 
@@ -36,6 +61,8 @@ uv run alembic upgrade head
 uv run uvicorn app.main:app --reload
 ```
 
+Interactive API docs at `http://localhost:8000/docs` (disabled when `APP_ENV=production`).
+
 ## Testing
 
 ```bash
@@ -46,11 +73,12 @@ uv run pytest tests/integration -v
 
 ## API
 
-| Method | Path                    | Description                          |
-|--------|--------------------------|---------------------------------------|
-| POST   | `/chat`                 | Run the agent graph on a user message |
-| POST   | `/documents/upload`     | Upload a pdf/txt/md document for RAG  |
-| GET    | `/documents`            | List uploaded documents               |
-| DELETE | `/documents/{id}`       | Delete a document and its chunks      |
+| Method | Path | Description |
+|---|---|---|
+| GET | `/health` | Liveness — process is up; checks no dependencies |
+| GET | `/health/ready` | Readiness — verifies database connectivity |
+| POST | `/documents/upload` | Upload a pdf/txt/markdown document for retrieval |
+| GET | `/documents` | List uploaded documents with chunk counts |
+| DELETE | `/documents/{id}` | Delete a document and its chunks |
 
-Full request/response contracts: see `app/models/schemas.py`.
+Request/response contracts: `app/models/schemas.py`.

@@ -1,6 +1,6 @@
 import uuid
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import Column, DateTime, ForeignKey, String, Text
@@ -9,7 +9,7 @@ from sqlmodel import Field, SQLModel
 EMBEDDING_DIM = 1536
 
 
-class DocumentStatus(str, Enum):
+class DocumentStatus(StrEnum):
     UPLOADED = "uploaded"
     PROCESSING = "processing"
     READY = "ready"

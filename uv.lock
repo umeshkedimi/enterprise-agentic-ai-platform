@@ -188,7 +188,7 @@ wheels = [
 ]
 
 [[package]]
-name = "enterprise-knowledge-agent-platform"
+name = "enterprise-agentic-ai-platform"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
