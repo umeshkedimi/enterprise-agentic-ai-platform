@@ -41,3 +41,6 @@ docker/postgres/data/
 
 # Alembic (keep versions, ignore local sqlite if any)
 *.sqlite3
+
+# Local assistant context (not part of the project deliverable)
+CLAUDE.md
