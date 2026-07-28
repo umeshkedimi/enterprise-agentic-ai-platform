@@ -23,10 +23,21 @@ config.set_main_option("sqlalchemy.url", get_settings().database_url_sync)
 
 target_metadata = sqlmodel_metadata
 
-# other values from the config, defined by the needs of env.py,
-# can be acquired:
-# my_important_option = config.get_main_option("my_important_option")
-# ... etc.
+
+def include_object(object, name, type_, reflected, compare_to):
+    """Keep autogenerate from proposing to drop objects it cannot represent.
+
+    The pgvector HNSW index is created with raw SQL in a migration because its
+    `USING hnsw (embedding vector_cosine_ops)` form has no SQLModel/SQLAlchemy
+    metadata equivalent. Autogenerate therefore sees it only in the database,
+    finds no match in the model metadata, and emits a `drop_index` — silently
+    removing the index that makes semantic search fast. Excluding it here makes
+    autogenerate leave vector indexes alone; they are owned by hand-written
+    migrations, not by the model metadata.
+    """
+    if type_ == "index" and name and name.endswith("_hnsw"):
+        return False
+    return True
 
 
 def run_migrations_offline() -> None:
@@ -47,6 +58,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        include_object=include_object,
     )
 
     with context.begin_transaction():
@@ -68,7 +80,9 @@ def run_migrations_online() -> None:
 
     with connectable.connect() as connection:
         context.configure(
-            connection=connection, target_metadata=target_metadata
+            connection=connection,
+            target_metadata=target_metadata,
+            include_object=include_object,
         )
 
         with context.begin_transaction():

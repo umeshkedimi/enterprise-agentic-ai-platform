@@ -44,3 +44,4 @@ docker/postgres/data/
 
 # Local assistant context (not part of the project deliverable)
 CLAUDE.md
+CLAUDE.local.md
