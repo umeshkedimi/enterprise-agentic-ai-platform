@@ -16,6 +16,12 @@ class Settings(BaseSettings):
 
     redis_url: str = "redis://localhost:6379/0"
 
+    # Gates tenant provisioning (creating tenants, minting API keys) — a
+    # privileged control-plane operation, distinct from a tenant using the
+    # platform. Empty by default so admin endpoints fail closed until an
+    # operator sets it: an unset secret must never mean "no auth required".
+    platform_admin_token: str = ""
+
     llm_provider: Literal["openai", "azure"] = "openai"
 
     openai_api_key: str = ""
