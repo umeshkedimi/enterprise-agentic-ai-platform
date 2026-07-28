@@ -4,33 +4,50 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
+from app.models.agent import Collection
 from app.models.document import Document, DocumentChunk, DocumentStatus
 from app.services.chunking import chunk_text, count_tokens, extract_text
 from app.services.embedding_service import embed_texts
+from app.services.errors import NotFoundError
 
 logger = get_logger(__name__)
 
 SUPPORTED_CONTENT_TYPES = {"application/pdf", "text/plain", "text/markdown"}
 
 
+async def _assert_collection_in_tenant(
+    session: AsyncSession, *, tenant_id: uuid.UUID, collection_id: uuid.UUID
+) -> None:
+    collection = await session.get(Collection, collection_id)
+    if collection is None or collection.tenant_id != tenant_id:
+        raise NotFoundError(f"collection {collection_id}")
+
+
 async def upload_document(
     session: AsyncSession,
     *,
+    tenant_id: uuid.UUID,
+    collection_id: uuid.UUID,
     filename: str,
     content_type: str,
     content: bytes,
-    tenant_id: str = "default",
 ) -> tuple[Document, int]:
-    """Create a Document row and synchronously process it: extract, chunk, embed, store.
+    """Create a Document in a collection and process it: extract, chunk, embed, store.
 
-    On any failure the document is left in a FAILED state with an error_message
-    rather than raising — callers decide how to surface that to the API layer.
+    The collection is verified to belong to the calling tenant first, so a
+    caller cannot ingest into another team's knowledge scope. On any processing
+    failure the document is left FAILED with an error_message rather than
+    raising — callers decide how to surface that to the API layer.
     """
+    await _assert_collection_in_tenant(
+        session, tenant_id=tenant_id, collection_id=collection_id
+    )
+
     document = Document(
+        collection_id=collection_id,
         filename=filename,
         content_type=content_type,
         status=DocumentStatus.UPLOADED,
-        tenant_id=tenant_id,
     )
     session.add(document)
     await session.commit()
@@ -77,12 +94,15 @@ async def upload_document(
 
 
 async def list_documents(
-    session: AsyncSession, tenant_id: str = "default"
+    session: AsyncSession, *, tenant_id: uuid.UUID, collection_id: uuid.UUID
 ) -> list[tuple[Document, int]]:
+    await _assert_collection_in_tenant(
+        session, tenant_id=tenant_id, collection_id=collection_id
+    )
     stmt = (
         select(Document, func.count(DocumentChunk.id))
         .outerjoin(DocumentChunk, DocumentChunk.document_id == Document.id)
-        .where(Document.tenant_id == tenant_id)
+        .where(Document.collection_id == collection_id)
         .group_by(Document.id)
         .order_by(Document.uploaded_at.desc())
     )
@@ -90,9 +110,20 @@ async def list_documents(
     return [(doc, count) for doc, count in result.all()]
 
 
-async def delete_document(session: AsyncSession, document_id: uuid.UUID) -> bool:
+async def delete_document(
+    session: AsyncSession, *, tenant_id: uuid.UUID, document_id: uuid.UUID
+) -> bool:
+    """Delete a document, but only if it belongs to the calling tenant.
+
+    Ownership is checked by joining through the document's collection: a
+    document in another tenant's collection is indistinguishable from one that
+    does not exist, so a cross-tenant delete returns False (→ 404).
+    """
     document = await session.get(Document, document_id)
     if document is None:
+        return False
+    collection = await session.get(Collection, document.collection_id)
+    if collection is None or collection.tenant_id != tenant_id:
         return False
     await session.delete(document)
     await session.commit()

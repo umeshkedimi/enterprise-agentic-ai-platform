@@ -45,6 +45,7 @@ class ApiKeyIssuedResponse(BaseModel):
 
 class DocumentResponse(BaseModel):
     id: uuid.UUID
+    collection_id: uuid.UUID
     filename: str
     status: DocumentStatus
     chunk_count: int

@@ -25,11 +25,15 @@ async def semantic_search(
     session: AsyncSession,
     query: str,
     *,
-    tenant_id: str = "default",
+    collection_id: uuid.UUID,
     top_k: int = DEFAULT_TOP_K,
 ) -> list[RetrievedChunk]:
     """Embed the query and return the top_k most similar chunks (cosine similarity),
-    restricted to fully-processed documents in the given tenant.
+    restricted to fully-processed documents in the given collection.
+
+    Scoping by collection is the retrieval-time isolation boundary: an agent
+    searches only its own collection, so one team's documents can never surface
+    in another's answer even though all chunks share one physical table.
     """
     query_embedding = await embed_text(query)
     distance = DocumentChunk.embedding.cosine_distance(query_embedding)
@@ -37,7 +41,10 @@ async def semantic_search(
     stmt = (
         select(DocumentChunk, Document.filename, distance.label("distance"))
         .join(Document, Document.id == DocumentChunk.document_id)
-        .where(Document.tenant_id == tenant_id, Document.status == DocumentStatus.READY)
+        .where(
+            Document.collection_id == collection_id,
+            Document.status == DocumentStatus.READY,
+        )
         .order_by(distance)
         .limit(top_k)
     )

@@ -24,12 +24,21 @@ class Document(SQLModel, table=True):
     __tablename__ = "documents"
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    # A document lives inside a collection, which belongs to a tenant. Tenant
+    # scope is reached through this FK rather than duplicated here, so there is
+    # one source of truth for which team owns a document. ON DELETE CASCADE:
+    # deleting a collection removes its documents (and their chunks) — the
+    # knowledge is discarded with the scope that held it.
+    collection_id: uuid.UUID = Field(
+        sa_column=Column(
+            ForeignKey("collections.id", ondelete="CASCADE"), nullable=False, index=True
+        )
+    )
     filename: str
     content_type: str
     status: DocumentStatus = Field(
         default=DocumentStatus.UPLOADED, sa_column=Column(String(20), nullable=False)
     )
-    tenant_id: str = Field(default="default", index=True)
     uploaded_at: datetime = Field(
         default_factory=_utcnow, sa_column=Column(DateTime(timezone=True), nullable=False)
     )
