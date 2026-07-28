@@ -21,6 +21,11 @@ explicitly marked as not-yet-built.
   database entities. An agent is a row (system prompt, model, tool allowlist, collection scope, and
   execution policy: temperature, max output tokens, retrieval top-k), so onboarding an assistant is
   an authenticated `POST`, not a code change.
+- Multi-model routing — an agent's `model` string is resolved to a provider at request time
+  (OpenAI or Anthropic) through one LiteLLM-backed interface, with credentials held per provider.
+  The platform adapts the agent's execution policy to what each model actually accepts: current
+  Anthropic models reject `temperature`, so it is withheld and logged rather than 400-ing the
+  request. Token usage is normalised across providers and returned with every completion.
 - Document ingestion pipeline — upload into a collection, text extraction (PDF/txt/markdown),
   token-based chunking, batched embedding with retry, persistence to pgvector.
 - Semantic retrieval — cosine similarity search over chunks, scoped by collection and document
@@ -32,7 +37,7 @@ explicitly marked as not-yet-built.
 **Roadmap (not yet implemented)**
 
 LangGraph orchestration · tool registry and MCP integration · conversation persistence and memory ·
-SSE streaming · LiteLLM multi-provider routing · federated auth (OIDC/SSO) · async ingestion via
+SSE streaming · retrieval-grounded chat endpoint · federated auth (OIDC/SSO) · async ingestion via
 Celery/RabbitMQ · OpenTelemetry tracing and Prometheus metrics · evaluation (groundedness,
 confidence calibration) · Kubernetes manifests · CI/CD.
 
@@ -43,7 +48,7 @@ confidence calibration) · Kubernetes manifests · CI/CD.
 | API | `app/api` | FastAPI routers, request/response DTOs, HTTP error mapping |
 | Services | `app/services` | Tenancy, agent/collection config, ingestion, retrieval — framework-agnostic |
 | Models | `app/models` | SQLModel tables (persistence) + Pydantic DTOs (transport) |
-| Core | `app/core` | Settings, structured logging, middleware, LLM client factory |
+| Core | `app/core` | Settings, structured logging, middleware, model routing and provider credentials |
 | DB | `app/db` | Engine, session factory, Alembic metadata target |
 | Agents | `app/agents` | *(empty — LangGraph orchestration, roadmap)* |
 | Tools | `app/tools` | *(empty — tool registry and MCP, roadmap)* |
@@ -55,7 +60,8 @@ background worker, or a test without dragging in the web framework.
 
 - Python 3.12 (managed via [uv](https://docs.astral.sh/uv/))
 - Docker + Docker Compose
-- An OpenAI API key (or Azure OpenAI credentials)
+- An OpenAI API key (or Azure OpenAI credentials) — required: embeddings are pinned to OpenAI
+- Optionally an Anthropic API key, to run agents configured with Claude models
 
 ## Setup
 
@@ -97,6 +103,7 @@ Tenant-scoped routes authenticate with `Authorization: Bearer <api-key>`; admin 
 | POST | `/agents` | tenant | Register an agent (config-as-data) |
 | GET | `/agents` | tenant | List the tenant's agents |
 | GET/PATCH/DELETE | `/agents/{id}` | tenant | Fetch, update, or delete an agent |
+| POST | `/agents/{id}/complete` | tenant | Run one stateless turn on the agent's configured model |
 | POST | `/collections/{id}/documents` | tenant | Upload a pdf/txt/markdown document |
 | GET | `/collections/{id}/documents` | tenant | List documents with chunk counts |
 | DELETE | `/documents/{id}` | tenant | Delete a document and its chunks |

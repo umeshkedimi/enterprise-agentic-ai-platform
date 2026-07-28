@@ -6,10 +6,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_tenant
 from app.db.session import get_db_session
 from app.models.agent import Agent
-from app.models.schemas import AgentCreate, AgentResponse, AgentUpdate
+from app.models.schemas import (
+    AgentCompletionRequest,
+    AgentCompletionResponse,
+    AgentCreate,
+    AgentResponse,
+    AgentUpdate,
+    TokenUsageResponse,
+)
 from app.models.tenant import Tenant
-from app.services import agent_service
-from app.services.errors import NotFoundError, SlugAlreadyExistsError
+from app.services import agent_service, completion_service
+from app.services.errors import (
+    AgentDisabledError,
+    ModelConfigurationError,
+    ModelInvocationError,
+    NotFoundError,
+    ProviderNotConfiguredError,
+    SlugAlreadyExistsError,
+)
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -109,6 +123,62 @@ async def update_agent(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(exc) or "Not found."
         ) from exc
     return _to_response(agent)
+
+
+@router.post("/{agent_id}/complete", response_model=AgentCompletionResponse)
+async def complete(
+    agent_id: uuid.UUID,
+    body: AgentCompletionRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> AgentCompletionResponse:
+    """Run one stateless turn against the agent's configured model.
+
+    Deliberately stateless and retrieval-free: this exists to prove that an
+    agent's `model` is honored at runtime. Conversation state, retrieval, and
+    tool execution arrive with the orchestrated chat endpoint.
+    """
+    try:
+        agent = await agent_service.get_agent(session, tenant_id=tenant.id, agent_id=agent_id)
+    except NotFoundError as exc:
+        raise _NOT_FOUND from exc
+
+    turns = [completion_service.Turn(role=t.role, content=t.content) for t in body.turns]
+
+    try:
+        result = await completion_service.complete(agent=agent, turns=turns)
+    except AgentDisabledError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Agent is disabled."
+        ) from exc
+    except ModelConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Agent model '{agent.model}' does not map to a known provider.",
+        ) from exc
+    except ProviderNotConfiguredError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="No credentials configured for this model's provider.",
+        ) from exc
+    except ModelInvocationError as exc:
+        # The provider failed, not the caller — surfaced as a gateway error and
+        # without the upstream message, which can echo prompt content.
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="Model provider request failed."
+        ) from exc
+
+    return AgentCompletionResponse(
+        text=result.text,
+        model=result.model,
+        provider=result.provider,
+        usage=TokenUsageResponse(
+            prompt_tokens=result.usage.prompt_tokens,
+            completion_tokens=result.usage.completion_tokens,
+            total_tokens=result.usage.total_tokens,
+        ),
+        latency_ms=result.latency_ms,
+    )
 
 
 @router.delete("/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)

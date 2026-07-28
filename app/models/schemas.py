@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -119,6 +120,34 @@ class AgentResponse(BaseModel):
     enabled: bool
     created_at: datetime
     updated_at: datetime
+
+
+class CompletionTurn(BaseModel):
+    """One caller-supplied turn. The system role is not accepted: an agent's
+    instructions come from its stored configuration, not from the request."""
+
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1)
+
+
+class AgentCompletionRequest(BaseModel):
+    turns: list[CompletionTurn] = Field(min_length=1)
+
+
+class TokenUsageResponse(BaseModel):
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+
+
+class AgentCompletionResponse(BaseModel):
+    text: str
+    # Which model and provider actually served the request — the point of the
+    # multi-model layer is that this varies per agent, so it is reported back.
+    model: str
+    provider: str
+    usage: TokenUsageResponse
+    latency_ms: int
 
 
 class ChatRequest(BaseModel):
