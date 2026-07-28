@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     openai_chat_model: str = "gpt-4o-mini"
     openai_embedding_model: str = "text-embedding-3-small"
 
+    # Chat credentials are per-provider because the chat model is per-agent
+    # config: two agents in the same tenant may resolve to different providers
+    # on the same request path. Embeddings deliberately do not read this — the
+    # embedding provider is pinned to OpenAI platform-wide.
+    anthropic_api_key: str = ""
+
     azure_openai_api_key: str = ""
     azure_openai_endpoint: str = ""
     azure_openai_api_version: str = "2024-10-21"

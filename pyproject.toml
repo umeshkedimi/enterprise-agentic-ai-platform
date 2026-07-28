@@ -26,6 +26,7 @@ dependencies = [
     "pypdf>=5.1.0",
     "python-multipart>=0.0.17",
     "tiktoken>=0.8.0",
+    "litellm>=1.93.0",
 ]
 
 [dependency-groups]
