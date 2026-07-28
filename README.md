@@ -2,10 +2,14 @@
 
 An internal platform for building, configuring, and operating AI agents across an organisation.
 Rather than each team hand-rolling its own assistant, a team registers an agent configuration —
-prompt, model, tool allowlist, knowledge scope — and the platform supplies the shared runtime:
-retrieval, orchestration, conversation state, streaming, and observability.
+prompt, model, tool allowlist, knowledge scope — and the platform owns the shared runtime once.
 
-Built on FastAPI, PostgreSQL/pgvector, and Redis.
+**Onboarding a new assistant is a configuration change, not a deployment.** Two agents diverge in
+behaviour entirely through the values in their rows: no branch in the code, no redeploy.
+
+Built on FastAPI, PostgreSQL/pgvector, and Redis. Today the shared runtime covers tenant isolation,
+knowledge scoping, ingestion, retrieval, and multi-provider model routing; orchestration,
+conversation state, and streaming are on the roadmap below.
 
 ## Status
 
@@ -46,7 +50,7 @@ confidence calibration) · Kubernetes manifests · CI/CD.
 | Layer | Package | Responsibility |
 |---|---|---|
 | API | `app/api` | FastAPI routers, request/response DTOs, HTTP error mapping |
-| Services | `app/services` | Tenancy, agent/collection config, ingestion, retrieval — framework-agnostic |
+| Services | `app/services` | Tenancy, agent/collection config, ingestion, retrieval, completions — framework-agnostic |
 | Models | `app/models` | SQLModel tables (persistence) + Pydantic DTOs (transport) |
 | Core | `app/core` | Settings, structured logging, middleware, model routing and provider credentials |
 | DB | `app/db` | Engine, session factory, Alembic metadata target |
@@ -66,7 +70,8 @@ background worker, or a test without dragging in the web framework.
 ## Setup
 
 ```bash
-cp .env.example .env   # fill in OPENAI_API_KEY
+cp .env.example .env   # set OPENAI_API_KEY; ANTHROPIC_API_KEY to run Claude agents;
+                       # PLATFORM_ADMIN_TOKEN to enable tenant provisioning
 uv sync
 
 docker compose up -d postgres redis
@@ -77,13 +82,85 @@ uv run uvicorn app.main:app --reload
 
 Interactive API docs at `http://localhost:8000/docs` (disabled when `APP_ENV=production`).
 
+## Walkthrough
+
+Two flows, mirroring the two roles. A **team owner** configures an agent once; **end users** then
+run it. Neither touches code.
+
+**Flow A — configure (once).** The platform operator provisions a tenant; everything after that is
+the team's own, authenticated with its key.
+
+```bash
+BASE=http://localhost:8000
+ADMIN="X-Admin-Token: $PLATFORM_ADMIN_TOKEN"
+JSON="content-type: application/json"
+
+TENANT=$(curl -sX POST $BASE/tenants -H "$ADMIN" -H "$JSON" \
+  -d '{"slug":"people-ops","name":"People Ops"}' | jq -r .id)
+
+# The plaintext key is returned exactly once — only its hash is stored.
+KEY=$(curl -sX POST $BASE/tenants/$TENANT/keys -H "$ADMIN" -H "$JSON" \
+  -d '{"name":"local-dev"}' | jq -r .api_key)
+AUTH="Authorization: Bearer $KEY"
+
+# A collection is the knowledge boundary: an agent searches its own, never another's.
+COLLECTION=$(curl -sX POST $BASE/collections -H "$AUTH" -H "$JSON" \
+  -d '{"slug":"hr-policies","name":"HR Policies"}' | jq -r .id)
+
+curl -sX POST $BASE/collections/$COLLECTION/documents -H "$AUTH" -F file=@handbook.pdf
+
+# The agent is a row. This POST is the entire onboarding.
+AGENT=$(curl -sX POST $BASE/agents -H "$AUTH" -H "$JSON" -d "{
+  \"slug\": \"hr-assistant\",
+  \"name\": \"HR Assistant\",
+  \"system_prompt\": \"You answer HR policy questions. Cite the policy you rely on.\",
+  \"model\": \"claude-sonnet-5\",
+  \"collection_id\": \"$COLLECTION\",
+  \"temperature\": 0.2,
+  \"max_output_tokens\": 1024
+}" | jq -r .id)
+```
+
+**Flow B — run.**
+
+```bash
+curl -sX POST $BASE/agents/$AGENT/complete -H "$AUTH" -H "$JSON" \
+  -d '{"turns":[{"role":"user","content":"How much paid leave do I get?"}]}'
+```
+
+```json
+{
+  "text": "...",
+  "model": "claude-sonnet-5",
+  "provider": "anthropic",
+  "usage": { "prompt_tokens": 412, "completion_tokens": 96, "total_tokens": 508 },
+  "latency_ms": 1183
+}
+```
+
+Switching providers is a `PATCH`, not a deployment — same endpoint, same code path, different
+vendor. The platform reconciles the execution policy with the new model's capabilities on the next
+request:
+
+```bash
+curl -sX PATCH $BASE/agents/$AGENT -H "$AUTH" -H "$JSON" -d '{"model":"gpt-4o-mini"}'
+```
+
+> **Scope note.** `/agents/{id}/complete` is stateless and does **not** yet consult the agent's
+> collection — it exists to prove that stored configuration selects the model and provider at
+> runtime. Retrieval is implemented and tested at the service layer; wiring it into a
+> conversational, tool-capable endpoint is the next chunk of work (see the roadmap).
+
 ## Testing
 
 ```bash
-uv run pytest tests/unit -v
+uv run pytest tests/unit -v          # no external dependencies
 docker compose up -d postgres redis
-uv run pytest tests/integration -v
+uv run pytest tests/integration -v   # requires Postgres
 ```
+
+The suite never calls a model provider: completions are faked at the LiteLLM boundary and the
+ingestion tests avoid the embedding API, so tests run offline and need no vendor credentials.
 
 ## API
 
@@ -109,3 +186,35 @@ Tenant-scoped routes authenticate with `Authorization: Bearer <api-key>`; admin 
 | DELETE | `/documents/{id}` | tenant | Delete a document and its chunks |
 
 Request/response contracts: `app/models/schemas.py`.
+
+## Design decisions
+
+- **Tenancy lives in foreign keys and queries, never in a prompt.** Every query touching
+  tenant-owned data filters on `tenant_id`, and an agent can only reference a collection its own
+  tenant owns. Asking a model to respect a boundary is not isolation.
+- **Cross-tenant references return 404, not 403.** A 403 confirms that someone else's resource
+  exists; not-found leaks nothing.
+- **API keys are stored as SHA-256 hashes.** The plaintext is shown once at mint time and is
+  unrecoverable afterwards; a short `key_prefix` is kept so a key can be identified without
+  storing anything usable. A database dump yields no working credential.
+- **The admin token fails closed.** Unset means tenant provisioning is disabled, never
+  "authentication not required".
+- **The embedding provider is pinned; the chat provider is not.** Changing the embedding model
+  invalidates every stored vector and forces a full re-index, so it is a platform-wide constant.
+  Chat models are per-agent config and vary freely.
+- **Model capabilities are read from the provider map, never hardcoded.** Current Anthropic models
+  removed sampling parameters, so sending `temperature` is a 400 — and the default agent sets one.
+  The routing layer reads the per-model capability flag, withholds the parameter, and logs the
+  omission. A newly released model becomes a dependency bump rather than a code change.
+- **Incompatible model/policy combinations adapt at runtime rather than failing at create time.**
+  Capabilities shift underneath a stored config; keeping a configured agent runnable is the
+  platform's job.
+- **The system prompt comes from configuration, never the request.** Callers may only supply
+  `user` and `assistant` turns — enforced in the schema, so it is a boundary rather than a
+  convention.
+- **The tool allowlist grants nothing by default.** Capability is named explicitly per agent
+  instead of being inherited from whatever the platform happens to support.
+- **Liveness checks nothing; readiness checks Postgres.** A liveness probe wired to the database
+  turns a brief blip into a rolling restart of every replica.
+- **Services never import from `app/api`.** They raise domain errors and the router maps them to
+  status codes, which is what keeps the same logic callable from a worker or a test.
