@@ -5,7 +5,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from app.api import documents, health, tenants
+from app.api import agents, collections, documents, health, tenants
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging, get_logger
 from app.core.middleware import RequestContextMiddleware
@@ -62,6 +62,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(health.router)
     app.include_router(tenants.router)
+    app.include_router(collections.router)
+    app.include_router(agents.router)
     app.include_router(documents.router)
 
     _register_exception_handlers(app)

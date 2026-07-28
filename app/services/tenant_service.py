@@ -7,16 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.logging import get_logger
 from app.core.security import generate_api_key, hash_api_key, key_prefix
 from app.models.tenant import ApiKey, Tenant
+from app.services.errors import SlugAlreadyExistsError
+
+__all__ = ["SlugAlreadyExistsError", "authenticate", "create_tenant", "issue_api_key"]
 
 logger = get_logger(__name__)
-
-
-class SlugAlreadyExistsError(Exception):
-    """Raised when a tenant slug collides — the API layer maps this to 409.
-
-    A domain error, not an HTTPException: this service must stay callable from a
-    worker or a test without importing the web framework.
-    """
 
 
 async def create_tenant(session: AsyncSession, *, slug: str, name: str) -> Tenant:
