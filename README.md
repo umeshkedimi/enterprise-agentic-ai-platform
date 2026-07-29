@@ -8,8 +8,8 @@ prompt, model, tool allowlist, knowledge scope — and the platform owns the sha
 behaviour entirely through the values in their rows: no branch in the code, no redeploy.
 
 Built on FastAPI, PostgreSQL/pgvector, and Redis. Today the shared runtime covers tenant isolation,
-knowledge scoping, ingestion, retrieval, and multi-provider model routing; orchestration,
-conversation state, and streaming are on the roadmap below.
+knowledge scoping, ingestion, retrieval, multi-provider model routing, orchestration, conversation
+memory, and streaming; MCP, observability, and evaluation are on the roadmap below.
 
 ## Status
 
@@ -46,24 +46,34 @@ explicitly marked as not-yet-built.
   loop is bounded, the allowlist is enforced at execution rather than only by omitting the schema,
   and tool arguments are filtered to the declared parameters — so a tool's scope comes from the
   agent row and there is no argument through which a prompt injection can widen it.
+- Conversation memory — threads are stored server-side and scoped to a tenant and an agent. A
+  request carries a `conversation_id` and nothing else about the past; the platform replays the
+  thread itself, so a caller cannot fabricate an assistant turn it never received. The transcript
+  keeps every turn with the provenance of the answer — citations, tools, model, tokens, latency —
+  while a configurable window bounds how much of it is replayed to the model. LangGraph's Postgres
+  checkpointer persists graph execution state alongside it, keyed by conversation.
+- SSE streaming — `POST /agents/{id}/chat/stream` narrates the same turn as it happens: the
+  conversation id, the answer in fragments, an event for each tool call as it starts, then a
+  terminal frame carrying citations and token usage. Anything checkable before the first byte is
+  still a real status code; only failures after the headers travel in band as an `error` frame.
 - FastAPI application — app factory, lifespan-managed resources, request correlation IDs,
   structured JSON logging, liveness/readiness probes.
 - Postgres + pgvector and Redis via Docker Compose; Alembic migrations; multi-stage app image.
 
 **Roadmap (not yet implemented)**
 
-MCP integration · conversation persistence and memory · SSE streaming · federated auth (OIDC/SSO) ·
-async ingestion via Celery/RabbitMQ · OpenTelemetry tracing and Prometheus metrics · evaluation
-(groundedness, confidence calibration) · Kubernetes manifests · CI/CD.
+MCP integration · federated auth (OIDC/SSO) · async ingestion via Celery/RabbitMQ · OpenTelemetry
+tracing and Prometheus metrics · evaluation (groundedness, confidence calibration) · Kubernetes
+manifests · CI/CD.
 
 ## Architecture
 
 | Layer | Package | Responsibility |
 |---|---|---|
 | API | `app/api` | FastAPI routers, request/response DTOs, HTTP error mapping |
-| Agents | `app/agents` | The LangGraph workflow — state/context split, nodes, grounding prompts |
+| Agents | `app/agents` | The LangGraph workflow — state/context split, nodes, grounding prompts, checkpointer |
 | Tools | `app/tools` | Tool registry, per-agent capability resolution, built-in tools |
-| Services | `app/services` | Tenancy, agent/collection config, ingestion, retrieval, completions — framework-agnostic |
+| Services | `app/services` | Tenancy, agent/collection config, ingestion, retrieval, conversations, completions — framework-agnostic |
 | Models | `app/models` | SQLModel tables (persistence) + Pydantic DTOs (transport) |
 | Core | `app/core` | Settings, structured logging, middleware, model routing and provider credentials |
 | DB | `app/db` | Engine, session factory, Alembic metadata target |
@@ -74,9 +84,16 @@ background worker, or a test without dragging in the web framework.
 
 Within the graph, **state is what gets persisted and context is what does not**. State holds
 serializable conversation data; live handles — the database session, resolved settings, the agent
-row — travel in per-invocation context. That split is what will let a checkpointer be added for
-conversation memory without a resumed turn deserializing a dead connection, and it is why a resumed
-conversation reads the agent's *current* configuration rather than a copy frozen at its start.
+row — travel in per-invocation context. With the checkpointer attached that split is load-bearing
+rather than theoretical: state round-trips through Postgres between turns, so a live handle stored
+next to it would come back dead, and a resumed conversation reads the agent's *current*
+configuration rather than a copy frozen at its start.
+
+Conversation data lives in two stores, and they are not redundant. `conversation_messages` is the
+product record — tenant-scoped, queryable, and the only thing history is ever read from. The
+checkpointer is the execution record, keyed by an opaque thread id, and is what makes a turn
+resumable rather than restartable. Neither can do the other's job: a checkpoint cannot say which
+tenant owns it, and a transcript cannot resume a half-finished tool loop.
 
 ## Requirements
 
@@ -152,6 +169,7 @@ curl -sX POST $BASE/agents/$AGENT/chat -H "$AUTH" -H "$JSON" \
 
 ```json
 {
+  "conversation_id": "…",
   "answer": "Full-time employees accrue 25 days of paid annual leave [1].",
   "citations": [
     { "document_id": "…", "chunk_id": "…", "snippet": "…accrue twenty-five days…", "score": 0.83 }
@@ -173,14 +191,44 @@ it up on their next question:
 curl -sX PATCH $BASE/agents/$AGENT -H "$AUTH" -H "$JSON" -d '{"model":"gpt-4o-mini"}'
 ```
 
-> **Scope notes.** Conversations are not yet persisted: a client that wants multi-turn context
-> passes prior turns back in `history` (user/assistant only — the system role is configuration and
-> has no request shape that can supply it). Server-side threads and streaming are the next chunks
-> of work.
->
-> `/agents/{id}/complete` remains as the unorchestrated path — one turn, the agent's model, no
-> retrieval. It is useful for verifying a model or prompt change in isolation from retrieval
-> quality; `/chat` is the runtime the platform is actually for.
+A follow-up passes the `conversation_id` back and nothing else. The platform replays the thread it
+stored — there is no request shape that can supply history, which is what stops a caller inventing
+an assistant turn the agent never gave:
+
+```bash
+CONVERSATION=$(curl -sX POST $BASE/agents/$AGENT/chat -H "$AUTH" -H "$JSON" \
+  -d '{"message":"How much paid leave do I get?"}' | jq -r .conversation_id)
+
+curl -sX POST $BASE/agents/$AGENT/chat -H "$AUTH" -H "$JSON" \
+  -d "{\"message\":\"And for part-timers?\",\"conversation_id\":\"$CONVERSATION\"}"
+
+curl -s $BASE/agents/$AGENT/conversations/$CONVERSATION/messages -H "$AUTH"
+```
+
+The same turn, streamed:
+
+```bash
+curl -N -sX POST $BASE/agents/$AGENT/chat/stream -H "$AUTH" -H "$JSON" \
+  -d '{"message":"How much paid leave do I get?"}'
+```
+
+```
+event: conversation
+data: {"conversation_id": "…"}
+
+event: token
+data: {"text": "Full-time "}
+
+event: tool
+data: {"name": "search_knowledge_base"}
+
+event: done
+data: {"answer": "…", "citations": [...], "usage": {...}, "latency_ms": 1183}
+```
+
+> **Scope note.** `/agents/{id}/complete` remains as the unorchestrated path — one turn, the
+> agent's model, no retrieval, no memory. It is useful for verifying a model or prompt change in
+> isolation from retrieval quality; `/chat` is the runtime the platform is actually for.
 
 ## Testing
 
@@ -212,6 +260,10 @@ Tenant-scoped routes authenticate with `Authorization: Bearer <api-key>`; admin 
 | GET | `/agents` | tenant | List the tenant's agents |
 | GET/PATCH/DELETE | `/agents/{id}` | tenant | Fetch, update, or delete an agent |
 | POST | `/agents/{id}/chat` | tenant | Run an orchestrated turn — retrieve, then answer with citations |
+| POST | `/agents/{id}/chat/stream` | tenant | The same turn, streamed as server-sent events |
+| POST | `/agents/{id}/conversations` | tenant | Open a thread explicitly (`/chat` opens one on demand) |
+| GET | `/agents/{id}/conversations` | tenant | List the agent's threads, most recently active first |
+| GET | `/agents/{id}/conversations/{cid}/messages` | tenant | The full transcript, with per-turn citations and usage |
 | POST | `/agents/{id}/complete` | tenant | Run one turn on the agent's model, without retrieval |
 | POST | `/collections/{id}/documents` | tenant | Upload a pdf/txt/markdown document |
 | GET | `/collections/{id}/documents` | tenant | List documents with chunk counts |
@@ -241,9 +293,15 @@ Request/response contracts: `app/models/schemas.py`.
 - **Incompatible model/policy combinations adapt at runtime rather than failing at create time.**
   Capabilities shift underneath a stored config; keeping a configured agent runnable is the
   platform's job.
-- **The system prompt comes from configuration, never the request.** Callers may only supply
-  `user` and `assistant` turns — enforced in the schema, so it is a boundary rather than a
-  convention.
+- **The system prompt comes from configuration, never the request — and now neither is the
+  history.** A client that supplies its own prior turns can fabricate assistant ones, and a forged
+  turn is indistinguishable from a real one by the time it reaches the model. History is read from
+  rows the platform wrote; unknown request fields are rejected rather than ignored, so a client
+  still sending `history` is told rather than silently having it dropped.
+- **A thread belongs to the agent that produced it.** Continuing one under a different agent is a
+  404. That is a retrieval boundary, not tidiness: an HR agent's history holds passages an HR agent
+  was shown, and replaying it into a finance agent's context moves that text across the collection
+  boundary without any query ever crossing it.
 - **The tool allowlist grants nothing by default.** Capability is named explicitly per agent
   instead of being inherited from whatever the platform happens to support. It is enforced again
   when a call is executed, not only by omitting the schema from the request — a model can emit a
@@ -257,9 +315,19 @@ Request/response contracts: `app/models/schemas.py`.
 - **A failed retrieval fails the turn.** Answering anyway would quietly downgrade a grounded
   assistant to an ungrounded one at the moment nobody is watching.
 - **Graph state is what gets persisted; context is what does not.** Live handles — session,
-  settings, the agent row — travel in per-invocation context, so adding a checkpointer will not
+  settings, the agent row — travel in per-invocation context, so a checkpointed turn cannot
   resurrect a dead connection, and a resumed conversation reads the agent's current configuration
   rather than a copy frozen at its start.
+- **Graph state is scratch for one turn.** With a checkpointer attached, an invocation *merges*
+  into whatever the thread already holds, so every turn-scoped field is written explicitly at the
+  start of a turn. Left to default, turn two would cite turn one's passages and start with its tool
+  budget already spent.
+- **Conversation memory degrades rather than blocks.** If the checkpointer cannot be reached,
+  startup logs and continues: turns still run and history still replays from the transcript.
+  Refusing to serve traffic because memory is unavailable trades a feature for an outage.
+- **Streaming is an argument, not a second code path.** The same `complete()` call streams or does
+  not; retries, tool-call extraction, usage accounting, and error mapping are shared. A parallel
+  implementation is the one that quietly stops counting tokens.
 - **Liveness checks nothing; readiness checks Postgres.** A liveness probe wired to the database
   turns a brief blip into a rolling restart of every replica.
 - **Neither `app/agents` nor `app/services` imports from `app/api`.** They raise domain errors and
