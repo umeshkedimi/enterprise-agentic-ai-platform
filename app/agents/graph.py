@@ -25,7 +25,7 @@ from app.agents.prompts import (
 from app.agents.state import AgentState, OrchestrationContext
 from app.core.logging import get_logger
 from app.models.agent import Agent
-from app.services.completion_service import Turn, complete
+from app.services.completion_service import TokenUsage, Turn, complete
 from app.services.errors import RetrievalError
 from app.services.retrieval_service import semantic_search
 from app.tools.registry import Tool, ToolContext, resolve_tools
@@ -103,6 +103,16 @@ def _directives(agent: Agent, state: AgentState, tools: list[Tool]) -> list[str]
     return [GROUNDING_DIRECTIVE, NO_RESULTS_DIRECTIVE]
 
 
+def _add_usage(running: TokenUsage | None, latest: TokenUsage) -> TokenUsage:
+    if running is None:
+        return latest
+    return TokenUsage(
+        prompt_tokens=running.prompt_tokens + latest.prompt_tokens,
+        completion_tokens=running.completion_tokens + latest.completion_tokens,
+        total_tokens=running.total_tokens + latest.total_tokens,
+    )
+
+
 async def generate_node(state: AgentState, runtime: Runtime[OrchestrationContext]) -> dict:
     """Answer the question, or ask for a tool. Re-entered after each tool round."""
     agent = runtime.context.agent
@@ -135,8 +145,12 @@ async def generate_node(state: AgentState, runtime: Runtime[OrchestrationContext
         "answer": completion.text,
         "model": completion.model,
         "provider": completion.provider,
-        "usage": completion.usage,
-        "latency_ms": completion.latency_ms,
+        # Accumulated, not replaced. A tool loop makes one model call per pass
+        # and the tenant pays for all of them, so reporting only the last would
+        # understate the cost of exactly the turns that cost the most — and
+        # would make the token metrics in Chunk 6 quietly wrong.
+        "usage": _add_usage(state.get("usage"), completion.usage),
+        "latency_ms": state.get("latency_ms", 0) + completion.latency_ms,
     }
     if completion.tool_calls:
         # The assistant's own tool-call message must be replayed verbatim next

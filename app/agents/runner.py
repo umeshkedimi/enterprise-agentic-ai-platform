@@ -35,10 +35,12 @@ class AgentTurnResult:
     model: str
     provider: str
     usage: TokenUsage
-    # Wall-clock for the whole graph run, which is deliberately not the model
-    # latency the completion service reports: the gap between them is retrieval,
-    # and keeping both is what makes a slow answer diagnosable.
+    # Wall-clock for the whole graph run, which is deliberately not the same as
+    # the time spent waiting on the model: the gap between the two is retrieval
+    # and tool execution, and keeping both is what makes a slow answer
+    # diagnosable rather than merely slow.
     latency_ms: int
+    model_latency_ms: int = 0
     retrieved_chunks: int = 0
 
 
@@ -82,6 +84,8 @@ async def run_turn(
         grounded=bool(chunks),
         chunks=len(chunks),
         model=final.get("model"),
+        tools_used=final.get("tools_used", []),
+        total_tokens=final.get("usage", TokenUsage(0, 0, 0)).total_tokens,
         latency_ms=latency_ms,
     )
 
@@ -93,5 +97,6 @@ async def run_turn(
         provider=final.get("provider", ""),
         usage=final.get("usage", TokenUsage(0, 0, 0)),
         latency_ms=latency_ms,
+        model_latency_ms=final.get("latency_ms", 0),
         retrieved_chunks=len(chunks),
     )

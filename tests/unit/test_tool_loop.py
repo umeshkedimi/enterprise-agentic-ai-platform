@@ -269,6 +269,24 @@ async def test_the_loop_stops_at_the_step_cap(script, searched, settings):
     assert "tools" not in calls[-1]
 
 
+async def test_token_usage_covers_every_pass_of_the_loop(script, searched, settings):
+    _, queue = script
+    queue.append(tool_call_response("search_knowledge_base", {"query": "x"}))
+    queue.append(text_response("Answer."))
+
+    turn = await run_turn(
+        agent=make_agent(tool_allowlist=["search_knowledge_base"]),
+        question="How much leave?",
+        session=None,
+        settings=settings,
+    )
+
+    # Two model calls at 15 tokens each. Reporting only the last would understate
+    # exactly the turns that cost the most.
+    assert turn.usage.total_tokens == 30
+    assert turn.usage.prompt_tokens == 20
+
+
 async def test_a_failing_tool_is_reported_to_the_model_not_raised(
     script, searched, settings, monkeypatch
 ):
