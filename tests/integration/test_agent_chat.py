@@ -1,14 +1,11 @@
 """End-to-end orchestrated chat: upload → embed → pgvector search → grounded answer.
 
-Only the two network calls are faked — embeddings and the chat provider. Chunking,
-storage, the HNSW-indexed similarity query, prompt assembly, and error mapping are
-all the real code path, because the property worth pinning here is that an agent
-retrieves from *its own* collection and no other. A test that stubbed retrieval
-would assert the mock rather than the isolation boundary.
+The property worth pinning here is that an agent retrieves from *its own*
+collection and no other, and that the thread it replays is the one the platform
+stored. Fixtures and helpers live in `conftest.py`; only the chat provider is
+faked per test, because what it was asked to do is usually the assertion.
 """
 
-import hashlib
-import io
 import uuid
 from types import SimpleNamespace
 
@@ -16,60 +13,16 @@ import litellm
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from app.core.config import get_settings
 from app.db.session import async_session_factory
-from app.models.document import EMBEDDING_DIM
-from app.services import document_service, retrieval_service
-from tests.integration.conftest import _delete_tenant
-
-VACATION_TEXT = (
-    b"Vacation policy. Full-time employees accrue twenty-five days of paid annual "
-    b"leave each year. Vacation days carry over for a maximum of five days."
+from app.services import retrieval_service
+from tests.integration.conftest import (
+    EXPENSES_TEXT,
+    VACATION_TEXT,
+    _delete_tenant,
+    create_agent,
+    create_collection,
+    upload_document,
 )
-EXPENSES_TEXT = (
-    b"Expense policy. Reimbursement claims for travel must be submitted within "
-    b"thirty days. Receipts are required for any expense above fifty dollars."
-)
-
-
-def _fake_embedding(text: str) -> list[float]:
-    """A deterministic lexical embedding: tokens hashed into dimensions.
-
-    Real enough for cosine similarity to rank a vacation question above an
-    expenses document, which is the only property these tests lean on. Values
-    are stable across runs, so a retrieval assertion cannot flake.
-    """
-    vector = [0.0] * EMBEDDING_DIM
-    for token in text.lower().split():
-        token = token.strip(".,;:!?()")
-        if not token:
-            continue
-        index = int(hashlib.sha256(token.encode()).hexdigest(), 16) % EMBEDDING_DIM
-        vector[index] += 1.0
-    norm = sum(v * v for v in vector) ** 0.5
-    return [v / norm for v in vector] if norm else vector
-
-
-@pytest.fixture
-def fake_embeddings(monkeypatch):
-    async def embed_texts(texts: list[str]) -> list[list[float]]:
-        return [_fake_embedding(t) for t in texts]
-
-    async def embed_text(text: str) -> list[float]:
-        return _fake_embedding(text)
-
-    # Patched at the point of use: both modules import the function by name, so
-    # patching the embedding module itself would rebind nothing.
-    monkeypatch.setattr(document_service, "embed_texts", embed_texts)
-    monkeypatch.setattr(retrieval_service, "embed_text", embed_text)
-
-
-@pytest.fixture
-def provider_creds(app, monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-openai")
-    get_settings.cache_clear()
-    yield
-    get_settings.cache_clear()
 
 
 @pytest.fixture
@@ -89,35 +42,6 @@ def captured(monkeypatch):
     return calls
 
 
-async def _create_collection(client, slug: str) -> str:
-    r = await client.post("/collections", json={"slug": slug, "name": slug.title()})
-    assert r.status_code == 201, r.text
-    return r.json()["id"]
-
-
-async def _upload(client, collection_id: str, filename: str, body: bytes) -> None:
-    r = await client.post(
-        f"/collections/{collection_id}/documents",
-        files={"file": (filename, io.BytesIO(body), "text/plain")},
-    )
-    assert r.status_code == 201, r.text
-    assert r.json()["status"] == "ready", r.text
-
-
-async def _create_agent(client, *, slug: str, collection_id: str | None, **overrides) -> str:
-    payload = {
-        "slug": slug,
-        "name": "Policy Bot",
-        "system_prompt": "You are the HR policy assistant.",
-        "model": "gpt-4o-mini",
-        "collection_id": collection_id,
-        **overrides,
-    }
-    r = await client.post("/agents", json=payload)
-    assert r.status_code == 201, r.text
-    return r.json()["id"]
-
-
 async def test_chat_requires_auth(client):
     r = await client.post(f"/agents/{uuid.uuid4()}/chat", json={"message": "hi"})
     assert r.status_code == 401
@@ -131,7 +55,7 @@ async def test_chat_with_unknown_agent_is_404(authed_client):
 
 async def test_empty_message_is_rejected(authed_client):
     client, _ = authed_client
-    agent_id = await _create_agent(client, slug="a", collection_id=None)
+    agent_id = await create_agent(client, slug="a", collection_id=None)
     r = await client.post(f"/agents/{agent_id}/chat", json={"message": ""})
     assert r.status_code == 422
 
@@ -140,9 +64,9 @@ async def test_answer_is_grounded_in_the_agents_collection(
     authed_client, fake_embeddings, provider_creds, captured
 ):
     client, _ = authed_client
-    collection_id = await _create_collection(client, "hr")
-    await _upload(client, collection_id, "vacation.txt", VACATION_TEXT)
-    agent_id = await _create_agent(client, slug="hr-bot", collection_id=collection_id)
+    collection_id = await create_collection(client, "hr")
+    await upload_document(client, collection_id, "vacation.txt", VACATION_TEXT)
+    agent_id = await create_agent(client, slug="hr-bot", collection_id=collection_id)
 
     r = await client.post(
         f"/agents/{agent_id}/chat", json={"message": "How many vacation days do I accrue?"}
@@ -170,12 +94,12 @@ async def test_agent_cannot_retrieve_from_a_collection_it_is_not_bound_to(
     authed_client, fake_embeddings, provider_creds, captured
 ):
     client, _ = authed_client
-    hr_id = await _create_collection(client, "hr")
-    finance_id = await _create_collection(client, "finance")
-    await _upload(client, hr_id, "vacation.txt", VACATION_TEXT)
-    await _upload(client, finance_id, "expenses.txt", EXPENSES_TEXT)
+    hr_id = await create_collection(client, "hr")
+    finance_id = await create_collection(client, "finance")
+    await upload_document(client, hr_id, "vacation.txt", VACATION_TEXT)
+    await upload_document(client, finance_id, "expenses.txt", EXPENSES_TEXT)
 
-    agent_id = await _create_agent(client, slug="hr-bot", collection_id=hr_id)
+    agent_id = await create_agent(client, slug="hr-bot", collection_id=hr_id)
     r = await client.post(
         f"/agents/{agent_id}/chat",
         json={"message": "What is the deadline for submitting expense receipts?"},
@@ -194,7 +118,7 @@ async def test_agent_without_a_collection_answers_ungrounded(
     authed_client, fake_embeddings, provider_creds, captured
 ):
     client, _ = authed_client
-    agent_id = await _create_agent(client, slug="chatty", collection_id=None)
+    agent_id = await create_agent(client, slug="chatty", collection_id=None)
 
     r = await client.post(f"/agents/{agent_id}/chat", json={"message": "Hello there"})
 
@@ -208,8 +132,8 @@ async def test_empty_collection_still_answers_with_no_citations(
     authed_client, fake_embeddings, provider_creds, captured
 ):
     client, _ = authed_client
-    collection_id = await _create_collection(client, "empty")
-    agent_id = await _create_agent(client, slug="bare", collection_id=collection_id)
+    collection_id = await create_collection(client, "empty")
+    agent_id = await create_agent(client, slug="bare", collection_id=collection_id)
 
     r = await client.post(f"/agents/{agent_id}/chat", json={"message": "Anything?"})
 
@@ -224,7 +148,7 @@ async def test_the_platform_replays_the_thread_it_stored(
     authed_client, fake_embeddings, provider_creds, captured
 ):
     client, _ = authed_client
-    agent_id = await _create_agent(client, slug="chatty", collection_id=None)
+    agent_id = await create_agent(client, slug="chatty", collection_id=None)
 
     first = await client.post(f"/agents/{agent_id}/chat", json={"message": "How much leave?"})
     assert first.status_code == 200, first.text
@@ -251,7 +175,7 @@ async def test_the_platform_replays_the_thread_it_stored(
 
 async def test_a_caller_cannot_supply_its_own_history(authed_client):
     client, _ = authed_client
-    agent_id = await _create_agent(client, slug="chatty", collection_id=None)
+    agent_id = await create_agent(client, slug="chatty", collection_id=None)
 
     r = await client.post(
         f"/agents/{agent_id}/chat",
@@ -272,8 +196,8 @@ async def test_a_thread_cannot_be_continued_by_another_agent(
     authed_client, fake_embeddings, provider_creds, captured
 ):
     client, _ = authed_client
-    hr = await _create_agent(client, slug="hr-bot", collection_id=None)
-    finance = await _create_agent(client, slug="finance-bot", collection_id=None)
+    hr = await create_agent(client, slug="hr-bot", collection_id=None)
+    finance = await create_agent(client, slug="finance-bot", collection_id=None)
 
     started = await client.post(f"/agents/{hr}/chat", json={"message": "How much leave?"})
     conversation_id = started.json()["conversation_id"]
@@ -291,7 +215,7 @@ async def test_a_thread_cannot_be_continued_by_another_agent(
 
 async def test_another_tenants_conversation_is_404(app, authed_client, admin_headers):
     client, _ = authed_client
-    agent_id = await _create_agent(client, slug="mine", collection_id=None)
+    agent_id = await create_agent(client, slug="mine", collection_id=None)
     r = await client.post(f"/agents/{agent_id}/conversations", json={})
     conversation_id = r.json()["id"]
 
@@ -307,7 +231,7 @@ async def test_another_tenants_conversation_is_404(app, authed_client, admin_hea
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as intruder:
         intruder.headers["Authorization"] = f"Bearer {key.json()['api_key']}"
-        their_agent = await _create_agent(intruder, slug="theirs", collection_id=None)
+        their_agent = await create_agent(intruder, slug="theirs", collection_id=None)
         # A conversation id is a UUID, which is unguessable but not a secret.
         # Ownership is checked against the row, not inferred from the request.
         stolen = await intruder.post(
@@ -323,9 +247,9 @@ async def test_the_transcript_records_what_the_answer_cost_and_cited(
     authed_client, fake_embeddings, provider_creds, captured
 ):
     client, _ = authed_client
-    collection_id = await _create_collection(client, "hr")
-    await _upload(client, collection_id, "vacation.txt", VACATION_TEXT)
-    agent_id = await _create_agent(client, slug="hr-bot", collection_id=collection_id)
+    collection_id = await create_collection(client, "hr")
+    await upload_document(client, collection_id, "vacation.txt", VACATION_TEXT)
+    agent_id = await create_agent(client, slug="hr-bot", collection_id=collection_id)
 
     r = await client.post(f"/agents/{agent_id}/chat", json={"message": "How much leave?"})
     conversation_id = r.json()["conversation_id"]
@@ -347,8 +271,8 @@ async def test_a_failed_turn_records_nothing(
     authed_client, provider_creds, captured, monkeypatch
 ):
     client, _ = authed_client
-    collection_id = await _create_collection(client, "hr")
-    agent_id = await _create_agent(client, slug="hr-bot", collection_id=collection_id)
+    collection_id = await create_collection(client, "hr")
+    agent_id = await create_agent(client, slug="hr-bot", collection_id=collection_id)
     started = await client.post(f"/agents/{agent_id}/conversations", json={})
     conversation_id = started.json()["id"]
 
@@ -373,7 +297,7 @@ async def test_history_window_never_starts_the_replay_on_an_assistant_turn(
     authed_client, fake_embeddings, provider_creds, captured
 ):
     client, _ = authed_client
-    agent_id = await _create_agent(client, slug="chatty", collection_id=None)
+    agent_id = await create_agent(client, slug="chatty", collection_id=None)
 
     first = await client.post(f"/agents/{agent_id}/chat", json={"message": "one"})
     conversation_id = first.json()["conversation_id"]
@@ -400,7 +324,7 @@ async def test_history_window_never_starts_the_replay_on_an_assistant_turn(
 
 async def test_disabled_agent_is_409(authed_client, fake_embeddings, provider_creds, captured):
     client, _ = authed_client
-    agent_id = await _create_agent(client, slug="off", collection_id=None, enabled=False)
+    agent_id = await create_agent(client, slug="off", collection_id=None, enabled=False)
 
     r = await client.post(f"/agents/{agent_id}/chat", json={"message": "hi"})
 
@@ -410,7 +334,7 @@ async def test_disabled_agent_is_409(authed_client, fake_embeddings, provider_cr
 
 async def test_unknown_model_is_400(authed_client, provider_creds, captured):
     client, _ = authed_client
-    agent_id = await _create_agent(
+    agent_id = await create_agent(
         client, slug="typo", collection_id=None, model="gtp-4o-mini"
     )
 
@@ -425,8 +349,8 @@ async def test_retrieval_failure_fails_the_turn_rather_than_answering_blind(
     authed_client, provider_creds, captured, monkeypatch
 ):
     client, _ = authed_client
-    collection_id = await _create_collection(client, "hr")
-    agent_id = await _create_agent(client, slug="hr-bot", collection_id=collection_id)
+    collection_id = await create_collection(client, "hr")
+    agent_id = await create_agent(client, slug="hr-bot", collection_id=collection_id)
 
     async def broken_embed(text: str):
         raise RuntimeError("embedding provider unavailable")
@@ -443,9 +367,9 @@ async def test_model_can_search_again_through_a_tool_and_cite_what_it_finds(
     authed_client, fake_embeddings, provider_creds, monkeypatch
 ):
     client, _ = authed_client
-    collection_id = await _create_collection(client, "hr")
-    await _upload(client, collection_id, "vacation.txt", VACATION_TEXT)
-    agent_id = await _create_agent(
+    collection_id = await create_collection(client, "hr")
+    await upload_document(client, collection_id, "vacation.txt", VACATION_TEXT)
+    agent_id = await create_agent(
         client,
         slug="hr-bot",
         collection_id=collection_id,
@@ -512,10 +436,10 @@ async def test_tools_are_only_offered_when_the_allowlist_grants_them(
     authed_client, fake_embeddings, provider_creds, captured
 ):
     client, _ = authed_client
-    granted = await _create_agent(
+    granted = await create_agent(
         client, slug="with-tools", collection_id=None, tool_allowlist=["list_documents"]
     )
-    ungranted = await _create_agent(client, slug="no-tools", collection_id=None)
+    ungranted = await create_agent(client, slug="no-tools", collection_id=None)
 
     await client.post(f"/agents/{granted}/chat", json={"message": "hi"})
     await client.post(f"/agents/{ungranted}/chat", json={"message": "hi"})
@@ -528,7 +452,7 @@ async def test_tools_are_only_offered_when_the_allowlist_grants_them(
 
 async def test_another_tenants_agent_is_404(app, authed_client, admin_headers):
     client, _ = authed_client
-    agent_id = await _create_agent(client, slug="mine", collection_id=None)
+    agent_id = await create_agent(client, slug="mine", collection_id=None)
 
     other = await client.post(
         "/tenants", json={"slug": f"o-{uuid.uuid4().hex[:8]}", "name": "Other"},

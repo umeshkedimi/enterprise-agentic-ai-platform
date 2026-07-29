@@ -5,6 +5,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from app.agents.checkpointer import start_checkpointer, stop_checkpointer
 from app.api import agents, collections, documents, health, tenants
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging, get_logger
@@ -24,13 +25,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     Kubernetes deploy leaks Postgres connections from terminating pods until
     they time out server-side, and a large enough rollout can exhaust
     max_connections while the new pods are still trying to start.
+
+    The graph's checkpointer is started here for the same reason and with the
+    same discipline: it owns a connection pool, so it must not be opened by
+    importing a module, and it must be closed on the way out.
     """
     settings = get_settings()
     configure_logging(settings.log_level)
+    await start_checkpointer(settings)
     logger.info("application_startup", app_env=settings.app_env)
 
     yield
 
+    await stop_checkpointer()
     await engine.dispose()
     logger.info("application_shutdown")
 

@@ -40,8 +40,17 @@ class Settings(BaseSettings):
     azure_openai_chat_deployment: str = ""
     azure_openai_embedding_deployment: str = ""
 
+    # How many messages of a thread are replayed to the model. Bounds cost and
+    # context length; it does not bound what is stored — the transcript keeps
+    # every turn and the API serves all of it.
     history_window: int = 20
     history_ttl_seconds: int = 86400
+
+    # The graph checkpointer's own connection pool. Separate from the SQLAlchemy
+    # engine because LangGraph's saver speaks psycopg directly, so the two cannot
+    # share connections even though they share a database.
+    checkpointer_pool_size: int = 10
+    checkpointer_open_timeout: float = 10.0
 
     agent_max_retries: int = 2
 
