@@ -25,7 +25,7 @@ from app.agents.prompts import (
 from app.agents.state import AgentState, OrchestrationContext
 from app.core.logging import get_logger
 from app.models.agent import Agent
-from app.services.completion_service import TokenUsage, Turn, complete
+from app.services.completion_service import DeltaHandler, TokenUsage, Turn, complete
 from app.services.errors import RetrievalError
 from app.services.retrieval_service import semantic_search
 from app.tools.registry import Tool, ToolContext, resolve_tools
@@ -35,6 +35,12 @@ logger = get_logger(__name__)
 RETRIEVE = "retrieve"
 GENERATE = "generate"
 TOOLS = "tools"
+
+# Names for the two things a caller watching a turn can be told while it runs.
+# A tool event exists because the pause it explains — a second retrieval, a
+# reformulated search — is otherwise silence in the middle of an answer.
+TOKEN_EVENT = "token"
+TOOL_EVENT = "tool"
 
 # How many generate→tools round trips one turn may make. A cap is not optional:
 # a model that keeps calling tools would otherwise bill a tenant indefinitely and
@@ -103,6 +109,26 @@ def _directives(agent: Agent, state: AgentState, tools: list[Tool]) -> list[str]
     return [GROUNDING_DIRECTIVE, NO_RESULTS_DIRECTIVE]
 
 
+def _delta_writer(runtime: Runtime[OrchestrationContext]) -> DeltaHandler | None:
+    """A sink for token fragments, or None to leave the call unstreamed.
+
+    Returning None matters: streaming has a real cost (a chunked provider
+    response, a reassembly pass) and a turn nobody is watching should not pay it.
+    The events go through LangGraph's stream writer rather than out of the node
+    directly, so a node stays a function of state that happens to narrate itself
+    — the transport is the graph's problem, not the node's.
+    """
+    if not runtime.context.stream:
+        return None
+
+    writer = runtime.stream_writer
+
+    def emit(text: str) -> None:
+        writer({"type": TOKEN_EVENT, "text": text})
+
+    return emit
+
+
 def _add_usage(running: TokenUsage | None, latest: TokenUsage) -> TokenUsage:
     if running is None:
         return latest
@@ -138,6 +164,7 @@ async def generate_node(state: AgentState, runtime: Runtime[OrchestrationContext
         system_directives=_directives(agent, state, tools),
         tools=[t.to_schema() for t in tools],
         scratchpad=state.get("scratchpad", []),
+        on_delta=_delta_writer(runtime),
         settings=runtime.context.settings,
     )
 
@@ -174,6 +201,10 @@ async def tools_node(state: AgentState, runtime: Runtime[OrchestrationContext]) 
     results: list[dict] = []
     used: list[str] = []
     for call in state.get("pending_calls", []):
+        if runtime.context.stream:
+            # Announced before it runs, not after. The point of the event is to
+            # explain a pause a caller is already sitting through.
+            runtime.stream_writer({"type": TOOL_EVENT, "name": call.name})
         tool = allowed.get(call.name)
         if tool is None:
             # The allowlist is enforced here, at execution, not only by omitting

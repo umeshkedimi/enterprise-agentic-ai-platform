@@ -7,7 +7,7 @@ execution policy; LiteLLM supplies one calling convention across providers.
 """
 
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -25,6 +25,11 @@ from app.services.errors import (
 )
 
 logger = get_logger(__name__)
+
+# Called with each text fragment as the provider emits it. Synchronous and
+# fire-and-forget by design: a handler that could block or fail would put the
+# transport in a position to stall or break the model call it is only observing.
+DeltaHandler = Callable[[str], None]
 
 
 @dataclass(frozen=True)
@@ -115,6 +120,40 @@ def _extract_usage(response: Any) -> TokenUsage:
     )
 
 
+async def _invoke(params: dict[str, Any], on_delta: DeltaHandler | None) -> Any:
+    """One provider call, streamed or not, returning the same response shape.
+
+    Streaming is an argument rather than a separate function because everything
+    around it — retries, tool-call extraction, usage accounting, error mapping —
+    is identical, and a parallel code path would be the one that quietly stops
+    counting tokens. LiteLLM's `stream_chunk_builder` reassembles the deltas into
+    exactly the response object the non-streaming call returns, so only the few
+    lines below know the difference.
+    """
+    if on_delta is None:
+        return await litellm.acompletion(**params)
+
+    # Providers omit usage from a streamed response unless asked. Without this,
+    # every streamed turn would bill as zero tokens.
+    params = {**params, "stream": True, "stream_options": {"include_usage": True}}
+    chunks: list[Any] = []
+    async for chunk in await litellm.acompletion(**params):
+        chunks.append(chunk)
+        choices = getattr(chunk, "choices", None) or []
+        delta = getattr(choices[0], "delta", None) if choices else None
+        text = getattr(delta, "content", None) if delta else None
+        if text:
+            on_delta(text)
+
+    rebuilt = litellm.stream_chunk_builder(chunks, messages=params["messages"])
+    if rebuilt is None:
+        # A stream that produced nothing at all. Raised rather than returned as
+        # an empty answer: an agent that says nothing looks like a bad answer,
+        # and this is a provider failure.
+        raise ModelInvocationError("provider returned an empty stream")
+    return rebuilt
+
+
 async def complete(
     *,
     agent: Agent,
@@ -122,6 +161,7 @@ async def complete(
     system_directives: Sequence[str] = (),
     tools: Sequence[dict[str, Any]] = (),
     scratchpad: Sequence[dict[str, Any]] = (),
+    on_delta: DeltaHandler | None = None,
     settings: Settings | None = None,
 ) -> Completion:
     """Invoke `agent`'s model with its configured prompt and execution policy.
@@ -137,6 +177,11 @@ async def complete(
     on purpose: tool messages are the one place where LiteLLM's normalized
     format *is* the interface, and wrapping it would buy a translation layer
     whose only job is to reproduce what it was handed.
+
+    `on_delta`, when given, switches the provider call to streaming and receives
+    each text fragment as it arrives. The return value is unchanged either way —
+    a caller that wants tokens early still gets the whole completion at the end,
+    so nothing downstream has to know how the answer was fetched.
     """
     settings = settings or get_settings()
 
@@ -197,7 +242,9 @@ async def complete(
 
     started = time.perf_counter()
     try:
-        response = await litellm.acompletion(**params)
+        response = await _invoke(params, on_delta)
+    except ModelInvocationError:
+        raise
     except Exception as exc:  # noqa: BLE001 - LiteLLM surfaces provider-specific types
         logger.warning(
             "completion_failed",
@@ -225,6 +272,7 @@ async def complete(
         prompt_tokens=usage.prompt_tokens,
         completion_tokens=usage.completion_tokens,
         tool_calls=len(tool_calls),
+        streamed=on_delta is not None,
         latency_ms=latency_ms,
     )
 

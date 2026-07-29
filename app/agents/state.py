@@ -37,6 +37,11 @@ class OrchestrationContext:
     agent: Agent
     session: AsyncSession
     settings: Settings
+    # Whether this invocation has a consumer for token-level events. Context
+    # rather than state for the usual reason — it describes how one call is being
+    # watched, and a conversation resumed tomorrow from a checkpoint has no
+    # bearing on whether somebody was streaming it yesterday.
+    stream: bool = False
 
 
 class AgentState(TypedDict, total=False):

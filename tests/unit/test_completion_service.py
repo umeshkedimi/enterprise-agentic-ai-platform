@@ -219,3 +219,87 @@ def test_turn_roles_exclude_system():
     # The agent's instructions come from configuration; a caller must not be
     # able to supply its own system turn.
     assert completion_service.Turn.__annotations__["role"].__args__ == ("user", "assistant")
+
+
+def _stream_chunk(content=None, usage=None):
+    from litellm.types.utils import Delta, ModelResponseStream, StreamingChoices
+
+    chunk = ModelResponseStream(
+        choices=[StreamingChoices(index=0, delta=Delta(content=content))]
+    )
+    if usage is not None:
+        chunk.usage = usage
+    return chunk
+
+
+async def test_streaming_returns_the_same_completion_it_streams(monkeypatch):
+    """Streaming is an argument, not a second code path.
+
+    The caller gets the identical `Completion` either way, which is what lets
+    the graph, the tool loop, and token accounting stay unaware of how the
+    answer was fetched.
+    """
+    from litellm.types.utils import Usage
+
+    sent: list[dict] = []
+    fragments: list[str] = []
+
+    async def _acompletion(**kwargs):
+        sent.append(kwargs)
+
+        async def chunks():
+            yield _stream_chunk(content="Hello ")
+            yield _stream_chunk(content="world.")
+            yield _stream_chunk(
+                usage=Usage(prompt_tokens=11, completion_tokens=7, total_tokens=18)
+            )
+
+        return chunks()
+
+    monkeypatch.setattr(litellm, "acompletion", _acompletion)
+
+    result = await complete(
+        agent=make_agent(model=OPENAI_MODEL),
+        turns=[Turn(role="user", content="hi")],
+        on_delta=fragments.append,
+        settings=SETTINGS,
+    )
+
+    assert fragments == ["Hello ", "world."]
+    assert result.text == "Hello world."
+    # Providers omit usage from a stream unless asked for it, so every streamed
+    # turn would otherwise bill as zero tokens.
+    assert sent[0]["stream_options"] == {"include_usage": True}
+    assert result.usage.total_tokens == 18
+
+
+async def test_an_empty_stream_is_a_provider_failure(monkeypatch):
+    async def _acompletion(**kwargs):
+        async def chunks():
+            return
+            yield  # pragma: no cover - makes this an async generator
+
+        return chunks()
+
+    monkeypatch.setattr(litellm, "acompletion", _acompletion)
+
+    # Reported as an upstream failure rather than returned as an empty answer:
+    # an agent that says nothing reads as a bad answer, not as an outage.
+    with pytest.raises(ModelInvocationError):
+        await complete(
+            agent=make_agent(model=OPENAI_MODEL),
+            turns=[Turn(role="user", content="hi")],
+            on_delta=lambda _: None,
+            settings=SETTINGS,
+        )
+
+
+async def test_a_turn_nobody_is_watching_is_not_streamed(monkeypatch, captured):
+    await complete(
+        agent=make_agent(model=OPENAI_MODEL),
+        turns=[Turn(role="user", content="hi")],
+        settings=SETTINGS,
+    )
+    # Streaming has a real cost — a chunked response and a reassembly pass — and
+    # a turn with no consumer for the fragments should not pay it.
+    assert "stream" not in captured[0]

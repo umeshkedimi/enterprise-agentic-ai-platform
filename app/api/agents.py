@@ -1,12 +1,14 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents import runner
+from app.api import sse
 from app.api.deps import get_current_tenant
 from app.core.config import get_settings
-from app.db.session import get_db_session
+from app.db.session import async_session_factory, get_db_session
 from app.models.agent import Agent
 from app.models.conversation import Conversation, ConversationMessage
 from app.models.schemas import (
@@ -376,6 +378,147 @@ async def chat(
         ),
         latency_ms=result.latency_ms,
     )
+
+
+@router.post("/{agent_id}/chat/stream")
+async def chat_stream(
+    agent_id: uuid.UUID,
+    body: AgentChatRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> StreamingResponse:
+    """The same turn as `/chat`, narrated as it happens.
+
+    Everything that can be checked before the response starts is checked here,
+    with the request's own session, so a missing agent or a foreign conversation
+    is a real 404 rather than a 200 containing bad news. Past that point the
+    status line has been sent and a failure can only be reported in-band, as an
+    `error` frame.
+    """
+    try:
+        agent = await agent_service.get_agent(session, tenant_id=tenant.id, agent_id=agent_id)
+    except NotFoundError as exc:
+        raise _NOT_FOUND from exc
+
+    try:
+        conversation = await conversation_service.resolve_conversation(
+            session, tenant_id=tenant.id, agent=agent, conversation_id=body.conversation_id
+        )
+    except NotFoundError as exc:
+        raise _CONVERSATION_NOT_FOUND from exc
+
+    if not agent.enabled:
+        # Hoisted out of the runner so a disabled agent is a 409 like it is
+        # everywhere else, rather than a 200 whose first frame is an error.
+        raise _to_http_error(AgentDisabledError(str(agent.id)), agent)
+
+    return StreamingResponse(
+        _stream_turn(
+            tenant_id=tenant.id,
+            agent_id=agent.id,
+            conversation_id=conversation.id,
+            message=body.message,
+        ),
+        media_type=sse.MEDIA_TYPE,
+        headers=sse.SSE_HEADERS,
+    )
+
+
+async def _stream_turn(
+    *, tenant_id: uuid.UUID, agent_id: uuid.UUID, conversation_id: uuid.UUID, message: str
+):
+    """Drive the turn on a session of its own.
+
+    Ids cross this boundary, not ORM objects. The request's session is already
+    closed by the time a streaming body is produced — FastAPI exits a `yield`
+    dependency once the response object is returned — so the rows are re-read
+    here, on the session that will actually be used. Handing the loaded objects
+    over instead raises "already attached to session" on the first write, and
+    only ever under streaming.
+    """
+    settings = get_settings()
+
+    async with async_session_factory() as session:
+        yield sse.frame("conversation", {"conversation_id": str(conversation_id)})
+
+        try:
+            agent = await agent_service.get_agent(
+                session, tenant_id=tenant_id, agent_id=agent_id
+            )
+            conversation = await conversation_service.get_conversation(
+                session, tenant_id=tenant_id, conversation_id=conversation_id
+            )
+        except NotFoundError:
+            # Deleted between the preflight checks and this line.
+            yield sse.frame("error", {"status": 404, "detail": "Agent not found."})
+            return
+
+        history = await conversation_service.load_history(
+            session, conversation_id=conversation.id, limit=settings.history_window
+        )
+
+        result = None
+        try:
+            async for event in runner.stream_turn(
+                agent=agent,
+                question=message,
+                history=history,
+                session=session,
+                conversation_id=conversation.id,
+                settings=settings,
+            ):
+                if isinstance(event, runner.TokenChunk):
+                    yield sse.frame("token", {"text": event.text})
+                elif isinstance(event, runner.ToolStarted):
+                    yield sse.frame("tool", {"name": event.name})
+                else:
+                    result = event
+        except DomainError as exc:
+            # The status code is still reported, in the payload, so a client has
+            # the same information it would have had from a failed `/chat` —
+            # whose problem it is, and whether retrying could help.
+            http_error = _to_http_error(exc, agent)
+            yield sse.frame(
+                "error", {"status": http_error.status_code, "detail": http_error.detail}
+            )
+            return
+
+        if result is None:  # pragma: no cover - the graph always yields a result
+            yield sse.frame("error", {"status": 502, "detail": "The turn produced no answer."})
+            return
+
+        await conversation_service.record_turn(
+            session,
+            conversation=conversation,
+            question=message,
+            answer=result.answer,
+            citations=result.citations,
+            tools_used=result.tools_used,
+            model=result.model,
+            provider=result.provider,
+            usage=result.usage,
+            latency_ms=result.latency_ms,
+        )
+
+        # Sent after the turn is recorded, so a client that reconnects on `done`
+        # and asks for the transcript finds the turn it just watched.
+        yield sse.frame(
+            "done",
+            {
+                "conversation_id": str(conversation.id),
+                "answer": result.answer,
+                "citations": [c.model_dump(mode="json") for c in result.citations],
+                "tools_used": result.tools_used,
+                "model": result.model,
+                "provider": result.provider,
+                "usage": {
+                    "prompt_tokens": result.usage.prompt_tokens,
+                    "completion_tokens": result.usage.completion_tokens,
+                    "total_tokens": result.usage.total_tokens,
+                },
+                "latency_ms": result.latency_ms,
+            },
+        )
 
 
 @router.delete("/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)
