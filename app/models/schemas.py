@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.agent import (
     DEFAULT_MAX_OUTPUT_TOKENS,
@@ -153,18 +153,63 @@ class AgentCompletionResponse(BaseModel):
 class AgentChatRequest(BaseModel):
     """One question for an orchestrated turn.
 
-    History is supplied by the caller and is still user/assistant only — the
-    platform does not yet persist conversations, so a client that wants
-    multi-turn context passes it back. Chunk 4 makes this optional by storing
-    the thread server-side; until then, saying so in the schema is more honest
-    than a `session_id` the runtime would ignore.
+    Note what is absent: history. The platform stores the thread and replays it
+    itself, so a caller supplies only the conversation to continue. That is a
+    security boundary rather than a convenience — a client that supplies its own
+    history can fabricate assistant turns, and a forged turn is indistinguishable
+    from a real one by the time it reaches the model.
+
+    Omitting `conversation_id` starts a new conversation; the id comes back on
+    the response, so a first call needs no setup.
     """
 
+    # Unknown fields are rejected rather than ignored. A client still sending the
+    # `history` this endpoint used to accept has a real expectation about what
+    # the model will see, and silently dropping it would look like the agent
+    # forgetting things at random. A 422 says what changed.
+    model_config = ConfigDict(extra="forbid")
+
     message: str = Field(min_length=1)
-    history: list[CompletionTurn] = Field(default_factory=list)
+    conversation_id: uuid.UUID | None = None
+
+
+class ConversationCreate(BaseModel):
+    title: str | None = Field(default=None, max_length=255)
+
+
+class ConversationResponse(BaseModel):
+    id: uuid.UUID
+    agent_id: uuid.UUID
+    title: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ConversationMessageResponse(BaseModel):
+    """One recorded turn, with the provenance of the answer it holds.
+
+    Citations, tools, model, and tokens are stored per message rather than
+    recomputed: they record what happened at the time, and an agent whose model
+    or knowledge scope has since been reconfigured must not appear, in its own
+    history, to have always been configured that way.
+    """
+
+    id: uuid.UUID
+    role: Literal["user", "assistant"]
+    content: str
+    citations: list[Citation]
+    tools_used: list[str]
+    model: str | None
+    provider: str | None
+    usage: TokenUsageResponse
+    latency_ms: int
+    created_at: datetime
 
 
 class AgentChatResponse(BaseModel):
+    # Echoed on every turn — a caller that omitted it is being told which thread
+    # its question landed in, and needs it to ask a follow-up.
+    conversation_id: uuid.UUID
     answer: str
     # What the answer was grounded in. Empty for an agent with no knowledge
     # scope, and empty when retrieval legitimately found nothing — the answer

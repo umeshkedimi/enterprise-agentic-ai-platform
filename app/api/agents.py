@@ -5,8 +5,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents import runner
 from app.api.deps import get_current_tenant
+from app.core.config import get_settings
 from app.db.session import get_db_session
 from app.models.agent import Agent
+from app.models.conversation import Conversation, ConversationMessage
 from app.models.schemas import (
     AgentChatRequest,
     AgentChatResponse,
@@ -15,10 +17,14 @@ from app.models.schemas import (
     AgentCreate,
     AgentResponse,
     AgentUpdate,
+    Citation,
+    ConversationCreate,
+    ConversationMessageResponse,
+    ConversationResponse,
     TokenUsageResponse,
 )
 from app.models.tenant import Tenant
-from app.services import agent_service, completion_service
+from app.services import agent_service, completion_service, conversation_service
 from app.services.errors import (
     AgentDisabledError,
     DomainError,
@@ -51,6 +57,38 @@ def _to_response(agent: Agent) -> AgentResponse:
 
 
 _NOT_FOUND = HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found.")
+_CONVERSATION_NOT_FOUND = HTTPException(
+    status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found."
+)
+
+
+def _to_conversation_response(conversation: Conversation) -> ConversationResponse:
+    return ConversationResponse(
+        id=conversation.id,
+        agent_id=conversation.agent_id,
+        title=conversation.title,
+        created_at=conversation.created_at,
+        updated_at=conversation.updated_at,
+    )
+
+
+def _to_message_response(message: ConversationMessage) -> ConversationMessageResponse:
+    return ConversationMessageResponse(
+        id=message.id,
+        role=message.role,  # type: ignore[arg-type]
+        content=message.content,
+        citations=[Citation(**c) for c in message.citations],
+        tools_used=message.tools_used,
+        model=message.model,
+        provider=message.provider,
+        usage=TokenUsageResponse(
+            prompt_tokens=message.prompt_tokens,
+            completion_tokens=message.completion_tokens,
+            total_tokens=message.total_tokens,
+        ),
+        latency_ms=message.latency_ms,
+        created_at=message.created_at,
+    )
 
 
 def _to_http_error(exc: DomainError, agent: Agent) -> HTTPException:
@@ -198,6 +236,72 @@ async def complete(
     )
 
 
+@router.post(
+    "/{agent_id}/conversations",
+    response_model=ConversationResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_conversation(
+    agent_id: uuid.UUID,
+    body: ConversationCreate,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> ConversationResponse:
+    """Open a thread explicitly. Optional — `/chat` opens one on demand."""
+    try:
+        agent = await agent_service.get_agent(session, tenant_id=tenant.id, agent_id=agent_id)
+    except NotFoundError as exc:
+        raise _NOT_FOUND from exc
+
+    conversation = await conversation_service.create_conversation(
+        session, tenant_id=tenant.id, agent_id=agent.id, title=body.title
+    )
+    return _to_conversation_response(conversation)
+
+
+@router.get("/{agent_id}/conversations", response_model=list[ConversationResponse])
+async def list_conversations(
+    agent_id: uuid.UUID,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[ConversationResponse]:
+    try:
+        agent = await agent_service.get_agent(session, tenant_id=tenant.id, agent_id=agent_id)
+    except NotFoundError as exc:
+        raise _NOT_FOUND from exc
+
+    conversations = await conversation_service.list_conversations(
+        session, tenant_id=tenant.id, agent_id=agent.id
+    )
+    return [_to_conversation_response(c) for c in conversations]
+
+
+@router.get(
+    "/{agent_id}/conversations/{conversation_id}/messages",
+    response_model=list[ConversationMessageResponse],
+)
+async def list_conversation_messages(
+    agent_id: uuid.UUID,
+    conversation_id: uuid.UUID,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[ConversationMessageResponse]:
+    """The full transcript, including turns older than the replay window.
+
+    The window bounds what the *model* is shown, not what the platform keeps.
+    """
+    try:
+        agent = await agent_service.get_agent(session, tenant_id=tenant.id, agent_id=agent_id)
+        conversation = await conversation_service.resolve_conversation(
+            session, tenant_id=tenant.id, agent=agent, conversation_id=conversation_id
+        )
+    except NotFoundError as exc:
+        raise _CONVERSATION_NOT_FOUND from exc
+
+    messages = await conversation_service.list_messages(session, conversation_id=conversation.id)
+    return [_to_message_response(m) for m in messages]
+
+
 @router.post("/{agent_id}/chat", response_model=AgentChatResponse)
 async def chat(
     agent_id: uuid.UUID,
@@ -209,25 +313,57 @@ async def chat(
 
     This is the runtime the platform exists to provide. Note what the request
     body cannot say: which collection to search, which model to use, what the
-    system prompt is. All of it comes from the agent row, so a team owner
+    system prompt is, and — since conversations became server-side — what was
+    said earlier. All of it comes from rows the platform owns, so a team owner
     reconfigures their assistant by editing config and every caller picks up the
-    change on the next request — no deployment, no client update.
+    change on the next request, with no deployment and no client update.
     """
     try:
         agent = await agent_service.get_agent(session, tenant_id=tenant.id, agent_id=agent_id)
     except NotFoundError as exc:
         raise _NOT_FOUND from exc
 
-    history = [completion_service.Turn(role=t.role, content=t.content) for t in body.history]
+    try:
+        conversation = await conversation_service.resolve_conversation(
+            session, tenant_id=tenant.id, agent=agent, conversation_id=body.conversation_id
+        )
+    except NotFoundError as exc:
+        raise _CONVERSATION_NOT_FOUND from exc
+
+    settings = get_settings()
+    history = await conversation_service.load_history(
+        session, conversation_id=conversation.id, limit=settings.history_window
+    )
 
     try:
         result = await runner.run_turn(
-            agent=agent, question=body.message, history=history, session=session
+            agent=agent,
+            question=body.message,
+            history=history,
+            session=session,
+            conversation_id=conversation.id,
+            settings=settings,
         )
     except DomainError as exc:
+        # Nothing is recorded on a failed turn. A question with no answer would
+        # be replayed to the model next time as an exchange it ignored.
         raise _to_http_error(exc, agent) from exc
 
+    await conversation_service.record_turn(
+        session,
+        conversation=conversation,
+        question=body.message,
+        answer=result.answer,
+        citations=result.citations,
+        tools_used=result.tools_used,
+        model=result.model,
+        provider=result.provider,
+        usage=result.usage,
+        latency_ms=result.latency_ms,
+    )
+
     return AgentChatResponse(
+        conversation_id=conversation.id,
         answer=result.answer,
         citations=result.citations,
         tools_used=result.tools_used,

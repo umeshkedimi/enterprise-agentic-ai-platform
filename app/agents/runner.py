@@ -7,12 +7,13 @@ Chunks 4 through 7 change the graph's shape without touching a single caller.
 """
 
 import time
+import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.graph import agent_graph
+from app.agents.graph import get_agent_graph
 from app.agents.state import AgentState, OrchestrationContext
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
@@ -44,12 +45,53 @@ class AgentTurnResult:
     retrieved_chunks: int = 0
 
 
+def _turn_state(question: str, history: Sequence[Turn]) -> AgentState:
+    """The starting state for one turn, with every turn-scoped key reset.
+
+    Every field is written explicitly, including the ones that look like they
+    could default. With a checkpointer attached, `ainvoke` *merges* the input
+    into whatever the thread already holds, and a key that is simply absent
+    keeps last turn's value: the previous question's retrieved chunks would be
+    cited under this question, and `tool_steps` would start at the cap so the
+    second turn in a conversation silently lost its tools.
+
+    The rule this encodes: graph state is scratch for one turn. The conversation
+    lives in the transcript, and arrives here as `history`.
+    """
+    return {
+        "question": question,
+        "history": list(history),
+        "chunks": [],
+        "scratchpad": [],
+        "pending_calls": [],
+        "tool_steps": 0,
+        "tools_used": [],
+        "answer": "",
+        "usage": None,
+        "latency_ms": 0,
+    }
+
+
+def _thread_config(conversation_id: uuid.UUID | None) -> dict:
+    """Bind this run to a checkpoint thread, when there is one to bind to.
+
+    The thread id is the conversation id, so a turn's execution trace is stored
+    next to the conversation it belongs to and a run interrupted mid-tool-loop
+    can be resumed rather than restarted. Without a conversation there is nothing
+    stable to key on, and the run stays unpersisted.
+    """
+    if conversation_id is None:
+        return {}
+    return {"configurable": {"thread_id": str(conversation_id)}}
+
+
 async def run_turn(
     *,
     agent: Agent,
     question: str,
     history: Sequence[Turn] = (),
     session: AsyncSession,
+    conversation_id: uuid.UUID | None = None,
     settings: Settings | None = None,
 ) -> AgentTurnResult:
     """Run one question through the orchestration graph under `agent`'s config.
@@ -65,7 +107,6 @@ async def run_turn(
         # its way to being refused.
         raise AgentDisabledError(str(agent.id))
 
-    state: AgentState = {"question": question, "history": list(history), "tools_used": []}
     context = OrchestrationContext(agent=agent, session=session, settings=settings)
 
     started = time.perf_counter()
@@ -73,7 +114,9 @@ async def run_turn(
     # anticipate is already a DomainError by the time it reaches this line, so
     # anything else is a bug — and turning a bug into a tidy 502 would hide it
     # behind a status code that says "the provider is having a bad day".
-    final = await agent_graph.ainvoke(state, context=context)
+    final = await get_agent_graph().ainvoke(
+        _turn_state(question, history), context=context, config=_thread_config(conversation_id)
+    )
     latency_ms = int((time.perf_counter() - started) * 1000)
 
     chunks = final.get("chunks", [])

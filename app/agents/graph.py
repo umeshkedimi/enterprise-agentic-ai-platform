@@ -254,4 +254,26 @@ def build_graph() -> StateGraph:
 # Compiled once per process: compilation validates the topology and builds the
 # executor, and neither depends on the request. The per-request part is the
 # context handed to `ainvoke`, which is exactly the part that is not cached.
-agent_graph = build_graph().compile()
+#
+# Two compilations exist because persistence is an operational dependency and
+# the graph is not. A checkpointer needs a live connection pool, which a unit
+# test, an import, or Alembic must not be made to open — so the default graph
+# runs without one and everything below `app/api` stays callable offline. The
+# application replaces it during startup, once the pool exists.
+_default_graph = build_graph().compile()
+_checkpointed_graph = None
+
+
+def set_checkpointer(checkpointer) -> None:
+    """Recompile the process graph against a checkpointer. Called once, at startup."""
+    global _checkpointed_graph
+    _checkpointed_graph = build_graph().compile(checkpointer=checkpointer)
+
+
+def clear_checkpointer() -> None:
+    global _checkpointed_graph
+    _checkpointed_graph = None
+
+
+def get_agent_graph():
+    return _checkpointed_graph or _default_graph

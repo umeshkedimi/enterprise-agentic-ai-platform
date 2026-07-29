@@ -70,5 +70,7 @@ class AgentState(TypedDict, total=False):
     answer: str
     model: str
     provider: str
-    usage: TokenUsage
+    # None until the first model call returns, because the tool loop accumulates
+    # into it and "nothing spent yet" is not the same as a zero-token turn.
+    usage: TokenUsage | None
     latency_ms: int
