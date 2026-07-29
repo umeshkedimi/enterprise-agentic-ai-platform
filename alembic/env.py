@@ -23,19 +23,40 @@ config.set_main_option("sqlalchemy.url", get_settings().database_url_sync)
 
 target_metadata = sqlmodel_metadata
 
+# Tables LangGraph's Postgres checkpointer creates and versions itself, via its
+# own `setup()` migration chain. They exist in the database and will never exist
+# in SQLModel metadata, which is exactly the shape autogenerate reacts to by
+# emitting `drop_table`.
+LANGGRAPH_TABLES = {
+    "checkpoints",
+    "checkpoint_blobs",
+    "checkpoint_writes",
+    "checkpoint_migrations",
+}
+
 
 def include_object(object, name, type_, reflected, compare_to):
     """Keep autogenerate from proposing to drop objects it cannot represent.
 
-    The pgvector HNSW index is created with raw SQL in a migration because its
-    `USING hnsw (embedding vector_cosine_ops)` form has no SQLModel/SQLAlchemy
-    metadata equivalent. Autogenerate therefore sees it only in the database,
-    finds no match in the model metadata, and emits a `drop_index` — silently
-    removing the index that makes semantic search fast. Excluding it here makes
-    autogenerate leave vector indexes alone; they are owned by hand-written
-    migrations, not by the model metadata.
+    Two kinds of object live in the database without a metadata equivalent, and
+    autogenerate's default reading of "in the DB, not in the models" is "drop
+    it" for both:
+
+    * The pgvector HNSW index, created with raw SQL because its
+      `USING hnsw (embedding vector_cosine_ops)` form has no SQLModel/SQLAlchemy
+      equivalent. Dropping it silently turns semantic search into a sequential
+      scan — a performance failure with no error attached.
+    * The checkpointer's tables, which LangGraph creates and migrates itself. We
+      do not own their schema and must not: hand-writing migrations for them
+      would pin us to one library version forever, and a dropped checkpoint
+      table takes every in-flight conversation with it.
+
+    Both are excluded here. Neither is unmanaged — each is owned by something
+    other than this metadata.
     """
     if type_ == "index" and name and name.endswith("_hnsw"):
+        return False
+    if type_ == "table" and name in LANGGRAPH_TABLES:
         return False
     return True
 
