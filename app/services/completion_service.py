@@ -58,9 +58,16 @@ class Completion:
     latency_ms: int
 
 
-def _build_messages(agent: Agent, turns: Sequence[Turn]) -> list[dict[str, str]]:
+def _build_messages(
+    agent: Agent, turns: Sequence[Turn], directives: Sequence[str]
+) -> list[dict[str, str]]:
+    # Concatenated into one system message rather than sent as several: providers
+    # disagree on whether multiple system messages are even permitted (Anthropic
+    # takes a single top-level `system`), and a shape that survives every provider
+    # is worth more here than the structure.
+    system = "\n\n".join([agent.system_prompt, *directives])
     return [
-        {"role": "system", "content": agent.system_prompt},
+        {"role": "system", "content": system},
         *({"role": t.role, "content": t.content} for t in turns),
     ]
 
@@ -80,9 +87,17 @@ async def complete(
     *,
     agent: Agent,
     turns: Sequence[Turn],
+    system_directives: Sequence[str] = (),
     settings: Settings | None = None,
 ) -> Completion:
-    """Invoke `agent`'s model with its configured prompt and execution policy."""
+    """Invoke `agent`'s model with its configured prompt and execution policy.
+
+    `system_directives` are platform-authored instructions appended after the
+    agent's own prompt — how to cite sources, when to refuse. They are a
+    caller-of-this-function argument, not a caller-of-the-API one: nothing
+    arriving over HTTP reaches the system role, which is the whole point of
+    keeping `Turn` restricted to user and assistant.
+    """
     settings = settings or get_settings()
 
     if not agent.enabled:
@@ -100,7 +115,7 @@ async def complete(
 
     params: dict[str, Any] = {
         "model": route.model,
-        "messages": _build_messages(agent, turns),
+        "messages": _build_messages(agent, turns, system_directives),
         "max_tokens": agent.max_output_tokens,
         "api_key": route.api_key,
         "num_retries": settings.agent_max_retries,

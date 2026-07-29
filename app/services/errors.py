@@ -47,3 +47,14 @@ class ProviderNotConfiguredError(DomainError):
 
 class ModelInvocationError(DomainError):
     """The upstream provider failed to complete the request (→ 502)."""
+
+
+class RetrievalError(DomainError):
+    """Evidence could not be gathered for a grounded answer (→ 502).
+
+    Almost always the embedding provider: a question has to be embedded before
+    it can be searched for. Distinct from an empty result, which is a legitimate
+    outcome the agent answers from — this is the search never having happened,
+    and answering anyway would silently downgrade a grounded assistant into an
+    ungrounded one at exactly the moment nobody is watching.
+    """
