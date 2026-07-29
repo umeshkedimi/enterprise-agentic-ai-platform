@@ -34,31 +34,43 @@ explicitly marked as not-yet-built.
   token-based chunking, batched embedding with retry, persistence to pgvector.
 - Semantic retrieval — cosine similarity search over chunks, scoped by collection and document
   status, so one team's knowledge never surfaces in another's results.
+- Retrieval-grounded chat — one LangGraph workflow serves every agent, branching on configuration
+  rather than identity: an agent with a collection routes through retrieval, one without goes
+  straight to generation. Answers come back with citations to the chunks they were grounded in.
+  Retrieved text is placed in the user turn, never the system prompt, so an uploaded document
+  cannot issue instructions; a failed retrieval fails the turn instead of silently answering
+  ungrounded.
 - FastAPI application — app factory, lifespan-managed resources, request correlation IDs,
   structured JSON logging, liveness/readiness probes.
 - Postgres + pgvector and Redis via Docker Compose; Alembic migrations; multi-stage app image.
 
 **Roadmap (not yet implemented)**
 
-LangGraph orchestration · tool registry and MCP integration · conversation persistence and memory ·
-SSE streaming · retrieval-grounded chat endpoint · federated auth (OIDC/SSO) · async ingestion via
-Celery/RabbitMQ · OpenTelemetry tracing and Prometheus metrics · evaluation (groundedness,
-confidence calibration) · Kubernetes manifests · CI/CD.
+Tool registry and MCP integration · conversation persistence and memory · SSE streaming · federated
+auth (OIDC/SSO) · async ingestion via Celery/RabbitMQ · OpenTelemetry tracing and Prometheus
+metrics · evaluation (groundedness, confidence calibration) · Kubernetes manifests · CI/CD.
 
 ## Architecture
 
 | Layer | Package | Responsibility |
 |---|---|---|
 | API | `app/api` | FastAPI routers, request/response DTOs, HTTP error mapping |
+| Agents | `app/agents` | The LangGraph workflow — state/context split, nodes, grounding prompts |
 | Services | `app/services` | Tenancy, agent/collection config, ingestion, retrieval, completions — framework-agnostic |
 | Models | `app/models` | SQLModel tables (persistence) + Pydantic DTOs (transport) |
 | Core | `app/core` | Settings, structured logging, middleware, model routing and provider credentials |
 | DB | `app/db` | Engine, session factory, Alembic metadata target |
-| Agents | `app/agents` | *(empty — LangGraph orchestration, roadmap)* |
 | Tools | `app/tools` | *(empty — tool registry and MCP, roadmap)* |
 
-Services never import from `app/api`, so the same logic is reachable from an HTTP handler, a
+Dependencies run one way: `api → agents → services → models/core/db`. Neither `app/agents` nor
+`app/services` imports from `app/api`, so the same logic is reachable from an HTTP handler, a
 background worker, or a test without dragging in the web framework.
+
+Within the graph, **state is what gets persisted and context is what does not**. State holds
+serializable conversation data; live handles — the database session, resolved settings, the agent
+row — travel in per-invocation context. That split is what will let a checkpointer be added for
+conversation memory without a resumed turn deserializing a dead connection, and it is why a resumed
+conversation reads the agent's *current* configuration rather than a copy frozen at its start.
 
 ## Requirements
 
@@ -124,13 +136,17 @@ AGENT=$(curl -sX POST $BASE/agents -H "$AUTH" -H "$JSON" -d "{
 **Flow B — run.**
 
 ```bash
-curl -sX POST $BASE/agents/$AGENT/complete -H "$AUTH" -H "$JSON" \
-  -d '{"turns":[{"role":"user","content":"How much paid leave do I get?"}]}'
+curl -sX POST $BASE/agents/$AGENT/chat -H "$AUTH" -H "$JSON" \
+  -d '{"message":"How much paid leave do I get?"}'
 ```
 
 ```json
 {
-  "text": "...",
+  "answer": "Full-time employees accrue 25 days of paid annual leave [1].",
+  "citations": [
+    { "document_id": "…", "chunk_id": "…", "snippet": "…accrue twenty-five days…", "score": 0.83 }
+  ],
+  "tools_used": [],
   "model": "claude-sonnet-5",
   "provider": "anthropic",
   "usage": { "prompt_tokens": 412, "completion_tokens": 96, "total_tokens": 508 },
@@ -138,18 +154,23 @@ curl -sX POST $BASE/agents/$AGENT/complete -H "$AUTH" -H "$JSON" \
 }
 ```
 
-Switching providers is a `PATCH`, not a deployment — same endpoint, same code path, different
-vendor. The platform reconciles the execution policy with the new model's capabilities on the next
-request:
+Note what the request body cannot say: which collection to search, which model to answer with, what
+the system prompt is. All of it is read from the agent row per request. So switching providers is a
+`PATCH`, not a deployment — same endpoint, same code path, different vendor — and every caller picks
+it up on their next question:
 
 ```bash
 curl -sX PATCH $BASE/agents/$AGENT -H "$AUTH" -H "$JSON" -d '{"model":"gpt-4o-mini"}'
 ```
 
-> **Scope note.** `/agents/{id}/complete` is stateless and does **not** yet consult the agent's
-> collection — it exists to prove that stored configuration selects the model and provider at
-> runtime. Retrieval is implemented and tested at the service layer; wiring it into a
-> conversational, tool-capable endpoint is the next chunk of work (see the roadmap).
+> **Scope notes.** Conversations are not yet persisted: a client that wants multi-turn context
+> passes prior turns back in `history` (user/assistant only — the system role is configuration and
+> has no request shape that can supply it). Server-side threads, streaming, and tool execution are
+> the next chunks of work.
+>
+> `/agents/{id}/complete` remains as the unorchestrated path — one turn, the agent's model, no
+> retrieval. It is useful for verifying a model or prompt change in isolation from retrieval
+> quality; `/chat` is the runtime the platform is actually for.
 
 ## Testing
 
@@ -180,7 +201,8 @@ Tenant-scoped routes authenticate with `Authorization: Bearer <api-key>`; admin 
 | POST | `/agents` | tenant | Register an agent (config-as-data) |
 | GET | `/agents` | tenant | List the tenant's agents |
 | GET/PATCH/DELETE | `/agents/{id}` | tenant | Fetch, update, or delete an agent |
-| POST | `/agents/{id}/complete` | tenant | Run one stateless turn on the agent's configured model |
+| POST | `/agents/{id}/chat` | tenant | Run an orchestrated turn — retrieve, then answer with citations |
+| POST | `/agents/{id}/complete` | tenant | Run one turn on the agent's model, without retrieval |
 | POST | `/collections/{id}/documents` | tenant | Upload a pdf/txt/markdown document |
 | GET | `/collections/{id}/documents` | tenant | List documents with chunk counts |
 | DELETE | `/documents/{id}` | tenant | Delete a document and its chunks |

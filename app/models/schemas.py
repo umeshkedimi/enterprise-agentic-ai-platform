@@ -150,13 +150,30 @@ class AgentCompletionResponse(BaseModel):
     latency_ms: int
 
 
-class ChatRequest(BaseModel):
-    session_id: str
-    message: str
+class AgentChatRequest(BaseModel):
+    """One question for an orchestrated turn.
+
+    History is supplied by the caller and is still user/assistant only — the
+    platform does not yet persist conversations, so a client that wants
+    multi-turn context passes it back. Chunk 4 makes this optional by storing
+    the thread server-side; until then, saying so in the schema is more honest
+    than a `session_id` the runtime would ignore.
+    """
+
+    message: str = Field(min_length=1)
+    history: list[CompletionTurn] = Field(default_factory=list)
 
 
-class ChatResponse(BaseModel):
-    response: str
+class AgentChatResponse(BaseModel):
+    answer: str
+    # What the answer was grounded in. Empty for an agent with no knowledge
+    # scope, and empty when retrieval legitimately found nothing — the answer
+    # text says which, because an uncited claim is the thing worth noticing.
     citations: list[Citation]
     tools_used: list[str]
+    model: str
+    provider: str
+    usage: TokenUsageResponse
+    # End-to-end for the turn, so it exceeds the model latency by the cost of
+    # retrieval. Keeping both is what makes a slow answer diagnosable.
     latency_ms: int

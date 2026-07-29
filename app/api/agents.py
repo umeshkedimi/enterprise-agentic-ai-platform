@@ -3,10 +3,13 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents import runner
 from app.api.deps import get_current_tenant
 from app.db.session import get_db_session
 from app.models.agent import Agent
 from app.models.schemas import (
+    AgentChatRequest,
+    AgentChatResponse,
     AgentCompletionRequest,
     AgentCompletionResponse,
     AgentCreate,
@@ -18,10 +21,11 @@ from app.models.tenant import Tenant
 from app.services import agent_service, completion_service
 from app.services.errors import (
     AgentDisabledError,
+    DomainError,
     ModelConfigurationError,
-    ModelInvocationError,
     NotFoundError,
     ProviderNotConfiguredError,
+    RetrievalError,
     SlugAlreadyExistsError,
 )
 
@@ -47,6 +51,37 @@ def _to_response(agent: Agent) -> AgentResponse:
 
 
 _NOT_FOUND = HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found.")
+
+
+def _to_http_error(exc: DomainError, agent: Agent) -> HTTPException:
+    """Map a run-an-agent failure onto the status code that describes who can fix it.
+
+    The distinction the codes carry is whose problem it is: 400 the tenant's
+    configuration, 409 their deliberate choice to disable the agent, 503 the
+    operator's unfinished wiring, 502 the upstream provider. Collapsing these
+    into one error would leave a team owner unable to tell a typo in their model
+    name from an outage they can only wait out.
+    """
+    if isinstance(exc, AgentDisabledError):
+        return HTTPException(status.HTTP_409_CONFLICT, "Agent is disabled.")
+    if isinstance(exc, ModelConfigurationError):
+        return HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Agent model '{agent.model}' does not map to a known provider.",
+        )
+    if isinstance(exc, ProviderNotConfiguredError):
+        return HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "No credentials configured for this model's provider.",
+        )
+    if isinstance(exc, RetrievalError):
+        return HTTPException(
+            status.HTTP_502_BAD_GATEWAY, "Could not search this agent's knowledge base."
+        )
+    # ModelInvocationError and anything else domain-level. The upstream message
+    # is withheld deliberately: provider errors echo prompt content, which here
+    # means retrieved document text.
+    return HTTPException(status.HTTP_502_BAD_GATEWAY, "Model provider request failed.")
 
 
 @router.post("", response_model=AgentResponse, status_code=status.HTTP_201_CREATED)
@@ -147,29 +182,55 @@ async def complete(
 
     try:
         result = await completion_service.complete(agent=agent, turns=turns)
-    except AgentDisabledError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail="Agent is disabled."
-        ) from exc
-    except ModelConfigurationError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Agent model '{agent.model}' does not map to a known provider.",
-        ) from exc
-    except ProviderNotConfiguredError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="No credentials configured for this model's provider.",
-        ) from exc
-    except ModelInvocationError as exc:
-        # The provider failed, not the caller — surfaced as a gateway error and
-        # without the upstream message, which can echo prompt content.
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail="Model provider request failed."
-        ) from exc
+    except DomainError as exc:
+        raise _to_http_error(exc, agent) from exc
 
     return AgentCompletionResponse(
         text=result.text,
+        model=result.model,
+        provider=result.provider,
+        usage=TokenUsageResponse(
+            prompt_tokens=result.usage.prompt_tokens,
+            completion_tokens=result.usage.completion_tokens,
+            total_tokens=result.usage.total_tokens,
+        ),
+        latency_ms=result.latency_ms,
+    )
+
+
+@router.post("/{agent_id}/chat", response_model=AgentChatResponse)
+async def chat(
+    agent_id: uuid.UUID,
+    body: AgentChatRequest,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_db_session),
+) -> AgentChatResponse:
+    """Run one orchestrated turn: retrieve the agent's evidence, then answer from it.
+
+    This is the runtime the platform exists to provide. Note what the request
+    body cannot say: which collection to search, which model to use, what the
+    system prompt is. All of it comes from the agent row, so a team owner
+    reconfigures their assistant by editing config and every caller picks up the
+    change on the next request — no deployment, no client update.
+    """
+    try:
+        agent = await agent_service.get_agent(session, tenant_id=tenant.id, agent_id=agent_id)
+    except NotFoundError as exc:
+        raise _NOT_FOUND from exc
+
+    history = [completion_service.Turn(role=t.role, content=t.content) for t in body.history]
+
+    try:
+        result = await runner.run_turn(
+            agent=agent, question=body.message, history=history, session=session
+        )
+    except DomainError as exc:
+        raise _to_http_error(exc, agent) from exc
+
+    return AgentChatResponse(
+        answer=result.answer,
+        citations=result.citations,
+        tools_used=result.tools_used,
         model=result.model,
         provider=result.provider,
         usage=TokenUsageResponse(
