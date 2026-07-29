@@ -14,13 +14,13 @@ serve the first turn.
 """
 
 from dataclasses import dataclass
-from typing import TypedDict
+from typing import Any, TypedDict
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.models.agent import Agent
-from app.services.completion_service import TokenUsage, Turn
+from app.services.completion_service import TokenUsage, ToolCall, Turn
 from app.services.retrieval_service import RetrievedChunk
 
 
@@ -46,16 +46,29 @@ class AgentState(TypedDict, total=False):
     question: str
     history: list[Turn]
 
-    # Filled by the retrieve node; empty for an agent with no knowledge scope.
+    # Evidence for this turn: the automatic search first, then anything a
+    # retrieval tool found. One list, because a citation should mean the same
+    # thing whichever search produced it.
     chunks: list[RetrievedChunk]
 
-    # Filled by the generate node.
+    # Tool-call and tool-result messages accumulated while looping, in provider
+    # shape. Replayed verbatim on each pass so the model sees what it asked for
+    # and what came back.
+    scratchpad: list[dict[str, Any]]
+
+    # Tool calls the model has asked for and that have not run yet. Emptied by
+    # the tools node, and the only thing the loop's exit condition consults —
+    # the model stops asking, so the graph stops looping.
+    pending_calls: list[ToolCall]
+
+    # Completed generate→tools round trips. The cap on this is what makes the
+    # loop terminate against a model that would otherwise keep calling tools.
+    tool_steps: int
+    tools_used: list[str]
+
+    # Filled by the generate node once it answers instead of calling a tool.
     answer: str
     model: str
     provider: str
     usage: TokenUsage
     latency_ms: int
-
-    # Names of tools invoked while producing this answer. Always empty until the
-    # tool node lands; present now so the shape of a turn does not change later.
-    tools_used: list[str]

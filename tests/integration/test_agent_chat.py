@@ -303,6 +303,93 @@ async def test_retrieval_failure_fails_the_turn_rather_than_answering_blind(
     assert captured == []
 
 
+async def test_model_can_search_again_through_a_tool_and_cite_what_it_finds(
+    authed_client, fake_embeddings, provider_creds, monkeypatch
+):
+    client, _ = authed_client
+    collection_id = await _create_collection(client, "hr")
+    await _upload(client, collection_id, "vacation.txt", VACATION_TEXT)
+    agent_id = await _create_agent(
+        client,
+        slug="hr-bot",
+        collection_id=collection_id,
+        tool_allowlist=["search_knowledge_base"],
+    )
+
+    # The model reformulates the user's vague wording and searches again — the
+    # case single-shot retrieval cannot handle and the loop exists for.
+    responses = [
+        SimpleNamespace(
+            model="gpt-4o-mini",
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=None,
+                        tool_calls=[
+                            SimpleNamespace(
+                                id="call_1",
+                                function=SimpleNamespace(
+                                    name="search_knowledge_base",
+                                    arguments='{"query": "annual leave accrual policy"}',
+                                ),
+                            )
+                        ],
+                        model_dump=lambda: {"role": "assistant", "content": None},
+                    )
+                )
+            ],
+            usage=SimpleNamespace(prompt_tokens=50, completion_tokens=10, total_tokens=60),
+        ),
+        SimpleNamespace(
+            model="gpt-4o-mini",
+            choices=[
+                SimpleNamespace(message=SimpleNamespace(content="Twenty-five days [1]."))
+            ],
+            usage=SimpleNamespace(prompt_tokens=90, completion_tokens=8, total_tokens=98),
+        ),
+    ]
+    seen: list[dict] = []
+
+    async def scripted(**kwargs):
+        seen.append(kwargs)
+        return responses[min(len(seen) - 1, len(responses) - 1)]
+
+    monkeypatch.setattr(litellm, "acompletion", scripted)
+
+    r = await client.post(
+        f"/agents/{agent_id}/chat", json={"message": "what about time off"}
+    )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["tools_used"] == ["search_knowledge_base"]
+    # The tool's own pgvector query ran for real and its result is citable. One
+    # citation, not two: the reformulated search returned a passage the
+    # automatic one had already found, and a passage is cited once.
+    assert len(body["citations"]) == 1
+    assert "twenty-five days" in body["citations"][0]["snippet"].lower()
+    assert "twenty-five days" in seen[1]["messages"][-1]["content"].lower()
+    assert seen[1]["messages"][-1]["role"] == "tool"
+
+
+async def test_tools_are_only_offered_when_the_allowlist_grants_them(
+    authed_client, fake_embeddings, provider_creds, captured
+):
+    client, _ = authed_client
+    granted = await _create_agent(
+        client, slug="with-tools", collection_id=None, tool_allowlist=["list_documents"]
+    )
+    ungranted = await _create_agent(client, slug="no-tools", collection_id=None)
+
+    await client.post(f"/agents/{granted}/chat", json={"message": "hi"})
+    await client.post(f"/agents/{ungranted}/chat", json={"message": "hi"})
+
+    # Capability is granted per agent, not inherited from what the platform
+    # happens to support.
+    assert [t["function"]["name"] for t in captured[0]["tools"]] == ["list_documents"]
+    assert "tools" not in captured[1]
+
+
 async def test_another_tenants_agent_is_404(app, authed_client, admin_headers):
     client, _ = authed_client
     agent_id = await _create_agent(client, slug="mine", collection_id=None)

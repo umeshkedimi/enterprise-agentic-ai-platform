@@ -53,6 +53,10 @@ class ModelRoute:
     # removed sampling parameters: sending `temperature` returns a 400. An
     # agent's stored temperature therefore cannot be forwarded unconditionally.
     supports_sampling_params: bool
+    # Whether the model can be handed tool schemas at all. An agent's allowlist
+    # is stored config and outlives any particular model choice, so a tool-using
+    # agent can be pointed at a model that cannot call tools.
+    supports_tool_calling: bool
 
 
 def _supports_sampling_params(model: str) -> bool:
@@ -61,6 +65,16 @@ def _supports_sampling_params(model: str) -> bool:
     # not a code change. Absent flag means the model still accepts sampling.
     flag = litellm.model_cost.get(model, {}).get("supports_sampling_params")
     return True if flag is None else bool(flag)
+
+
+def _supports_tool_calling(model: str) -> bool:
+    try:
+        return bool(litellm.supports_function_calling(model))
+    except Exception:  # noqa: BLE001 - unmapped models raise rather than return False
+        # Unknown to the model map. Assuming "no" keeps the agent runnable
+        # without tools; assuming "yes" would send schemas the provider rejects
+        # and fail the turn outright.
+        return False
 
 
 def resolve_model_route(model: str, settings: Settings | None = None) -> ModelRoute:
@@ -84,6 +98,7 @@ def resolve_model_route(model: str, settings: Settings | None = None) -> ModelRo
         provider=provider,
         api_key=api_key or None,
         supports_sampling_params=_supports_sampling_params(model),
+        supports_tool_calling=_supports_tool_calling(model),
     )
 
 

@@ -40,15 +40,21 @@ explicitly marked as not-yet-built.
   Retrieved text is placed in the user turn, never the system prompt, so an uploaded document
   cannot issue instructions; a failed retrieval fails the turn instead of silently answering
   ungrounded.
+- Tool execution — a registry of platform tools (`search_knowledge_base`, `list_documents`), each
+  granted per agent through its `tool_allowlist`, which defaults to empty. The model can search
+  again with better terms once it has seen the first result, and what it finds is citable. The
+  loop is bounded, the allowlist is enforced at execution rather than only by omitting the schema,
+  and tool arguments are filtered to the declared parameters — so a tool's scope comes from the
+  agent row and there is no argument through which a prompt injection can widen it.
 - FastAPI application — app factory, lifespan-managed resources, request correlation IDs,
   structured JSON logging, liveness/readiness probes.
 - Postgres + pgvector and Redis via Docker Compose; Alembic migrations; multi-stage app image.
 
 **Roadmap (not yet implemented)**
 
-Tool registry and MCP integration · conversation persistence and memory · SSE streaming · federated
-auth (OIDC/SSO) · async ingestion via Celery/RabbitMQ · OpenTelemetry tracing and Prometheus
-metrics · evaluation (groundedness, confidence calibration) · Kubernetes manifests · CI/CD.
+MCP integration · conversation persistence and memory · SSE streaming · federated auth (OIDC/SSO) ·
+async ingestion via Celery/RabbitMQ · OpenTelemetry tracing and Prometheus metrics · evaluation
+(groundedness, confidence calibration) · Kubernetes manifests · CI/CD.
 
 ## Architecture
 
@@ -56,13 +62,13 @@ metrics · evaluation (groundedness, confidence calibration) · Kubernetes manif
 |---|---|---|
 | API | `app/api` | FastAPI routers, request/response DTOs, HTTP error mapping |
 | Agents | `app/agents` | The LangGraph workflow — state/context split, nodes, grounding prompts |
+| Tools | `app/tools` | Tool registry, per-agent capability resolution, built-in tools |
 | Services | `app/services` | Tenancy, agent/collection config, ingestion, retrieval, completions — framework-agnostic |
 | Models | `app/models` | SQLModel tables (persistence) + Pydantic DTOs (transport) |
 | Core | `app/core` | Settings, structured logging, middleware, model routing and provider credentials |
 | DB | `app/db` | Engine, session factory, Alembic metadata target |
-| Tools | `app/tools` | *(empty — tool registry and MCP, roadmap)* |
 
-Dependencies run one way: `api → agents → services → models/core/db`. Neither `app/agents` nor
+Dependencies run one way: `api → agents → {services, tools} → models/core/db`. Neither `app/agents` nor
 `app/services` imports from `app/api`, so the same logic is reachable from an HTTP handler, a
 background worker, or a test without dragging in the web framework.
 
@@ -128,10 +134,14 @@ AGENT=$(curl -sX POST $BASE/agents -H "$AUTH" -H "$JSON" -d "{
   \"system_prompt\": \"You answer HR policy questions. Cite the policy you rely on.\",
   \"model\": \"claude-sonnet-5\",
   \"collection_id\": \"$COLLECTION\",
+  \"tool_allowlist\": [\"search_knowledge_base\", \"list_documents\"],
   \"temperature\": 0.2,
   \"max_output_tokens\": 1024
 }" | jq -r .id)
 ```
+
+Capability is granted, never inherited: omit `tool_allowlist` and the agent can call nothing, no
+matter how many tools the platform registers later.
 
 **Flow B — run.**
 
@@ -146,7 +156,7 @@ curl -sX POST $BASE/agents/$AGENT/chat -H "$AUTH" -H "$JSON" \
   "citations": [
     { "document_id": "…", "chunk_id": "…", "snippet": "…accrue twenty-five days…", "score": 0.83 }
   ],
-  "tools_used": [],
+  "tools_used": ["search_knowledge_base"],
   "model": "claude-sonnet-5",
   "provider": "anthropic",
   "usage": { "prompt_tokens": 412, "completion_tokens": 96, "total_tokens": 508 },
@@ -165,8 +175,8 @@ curl -sX PATCH $BASE/agents/$AGENT -H "$AUTH" -H "$JSON" -d '{"model":"gpt-4o-mi
 
 > **Scope notes.** Conversations are not yet persisted: a client that wants multi-turn context
 > passes prior turns back in `history` (user/assistant only — the system role is configuration and
-> has no request shape that can supply it). Server-side threads, streaming, and tool execution are
-> the next chunks of work.
+> has no request shape that can supply it). Server-side threads and streaming are the next chunks
+> of work.
 >
 > `/agents/{id}/complete` remains as the unorchestrated path — one turn, the agent's model, no
 > retrieval. It is useful for verifying a model or prompt change in isolation from retrieval
@@ -235,8 +245,23 @@ Request/response contracts: `app/models/schemas.py`.
   `user` and `assistant` turns — enforced in the schema, so it is a boundary rather than a
   convention.
 - **The tool allowlist grants nothing by default.** Capability is named explicitly per agent
-  instead of being inherited from whatever the platform happens to support.
+  instead of being inherited from whatever the platform happens to support. It is enforced again
+  when a call is executed, not only by omitting the schema from the request — a model can emit a
+  call it was never offered.
+- **A tool's scope comes from the agent row, never from an argument.** Arguments are filtered to
+  the tool's declared parameters, so there is no `collection_id` for an injected instruction to
+  supply. Isolation cannot be argued out of.
+- **Retrieved text goes in the user turn, never the system prompt.** Uploaded documents are data,
+  not instructions; a chunk reading "ignore your previous instructions" must arrive as a quoted
+  string rather than an elevated directive.
+- **A failed retrieval fails the turn.** Answering anyway would quietly downgrade a grounded
+  assistant to an ungrounded one at the moment nobody is watching.
+- **Graph state is what gets persisted; context is what does not.** Live handles — session,
+  settings, the agent row — travel in per-invocation context, so adding a checkpointer will not
+  resurrect a dead connection, and a resumed conversation reads the agent's current configuration
+  rather than a copy frozen at its start.
 - **Liveness checks nothing; readiness checks Postgres.** A liveness probe wired to the database
   turns a brief blip into a rolling restart of every replica.
-- **Services never import from `app/api`.** They raise domain errors and the router maps them to
-  status codes, which is what keeps the same logic callable from a worker or a test.
+- **Neither `app/agents` nor `app/services` imports from `app/api`.** They raise domain errors and
+  the router maps them to status codes, which is what keeps the same logic callable from a worker
+  or a test.

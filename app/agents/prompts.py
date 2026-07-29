@@ -33,6 +33,13 @@ A search of the configured knowledge base returned no material for this question
 Tell the user the documents available to you do not cover it, rather than \
 answering from general knowledge."""
 
+RETRY_SEARCH_DIRECTIVE = """\
+An initial search of the knowledge base returned nothing for this question. Before \
+concluding that the documents do not cover it, search again with different terms — \
+the search matches on meaning, so a phrasing closer to how a policy document would \
+word it often succeeds where the user's own wording did not. If a second attempt \
+also finds nothing, say plainly that the available documents do not cover it."""
+
 
 def format_sources(chunks: Sequence[RetrievedChunk]) -> str:
     """Render chunks as numbered sources; the numbering is what citations refer to."""
