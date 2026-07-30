@@ -9,7 +9,7 @@ behaviour entirely through the values in their rows: no branch in the code, no r
 
 Built on FastAPI, PostgreSQL/pgvector, and Redis. Today the shared runtime covers tenant isolation,
 knowledge scoping, ingestion, retrieval, multi-provider model routing, orchestration, conversation
-memory, and streaming; MCP, observability, and evaluation are on the roadmap below.
+memory, streaming, and MCP tool integration; observability and evaluation are on the roadmap below.
 
 ## Status
 
@@ -56,15 +56,22 @@ explicitly marked as not-yet-built.
   conversation id, the answer in fragments, an event for each tool call as it starts, then a
   terminal frame carrying citations and token usage. Anything checkable before the first byte is
   still a real status code; only failures after the headers travel in band as an `error` frame.
+- MCP integrations — a team registers a remote MCP server (`POST /mcp-servers`) and its tools become
+  grantable to that team's agents by name. Nothing in this repository knows what those tools do, so
+  adding a capability is a `POST` rather than a release. Discovered tools become ordinary platform
+  tools: the same allowlist, the same argument filtering, the same bounded loop. Remote HTTP
+  transport only — no subprocess launching — tenant-supplied URLs are checked against an SSRF guard
+  before every connection, and server credentials are encrypted at rest. A server that is
+  unreachable costs its tools, not the turn.
 - FastAPI application — app factory, lifespan-managed resources, request correlation IDs,
   structured JSON logging, liveness/readiness probes.
 - Postgres + pgvector and Redis via Docker Compose; Alembic migrations; multi-stage app image.
 
 **Roadmap (not yet implemented)**
 
-MCP integration · federated auth (OIDC/SSO) · async ingestion via Celery/RabbitMQ · OpenTelemetry
-tracing and Prometheus metrics · evaluation (groundedness, confidence calibration) · Kubernetes
-manifests · CI/CD.
+Federated auth (OIDC/SSO) · async ingestion via Celery/RabbitMQ · OpenTelemetry tracing and
+Prometheus metrics · evaluation (groundedness, confidence calibration) · Kubernetes manifests ·
+CI/CD.
 
 ## Architecture
 
@@ -72,10 +79,10 @@ manifests · CI/CD.
 |---|---|---|
 | API | `app/api` | FastAPI routers, request/response DTOs, HTTP error mapping |
 | Agents | `app/agents` | The LangGraph workflow — state/context split, nodes, grounding prompts, checkpointer |
-| Tools | `app/tools` | Tool registry, per-agent capability resolution, built-in tools |
+| Tools | `app/tools` | Tool registry, per-agent capability resolution, built-in tools, MCP client |
 | Services | `app/services` | Tenancy, agent/collection config, ingestion, retrieval, conversations, completions — framework-agnostic |
 | Models | `app/models` | SQLModel tables (persistence) + Pydantic DTOs (transport) |
-| Core | `app/core` | Settings, structured logging, middleware, model routing and provider credentials |
+| Core | `app/core` | Settings, structured logging, middleware, model routing, credential encryption, outbound-URL safety |
 | DB | `app/db` | Engine, session factory, Alembic metadata target |
 
 Dependencies run one way: `api → agents → {services, tools} → models/core/db`. Neither `app/agents` nor
@@ -101,6 +108,7 @@ tenant owns it, and a transcript cannot resume a half-finished tool loop.
 - Docker + Docker Compose
 - An OpenAI API key (or Azure OpenAI credentials) — required: embeddings are pinned to OpenAI
 - Optionally an Anthropic API key, to run agents configured with Claude models
+- Optionally a Fernet key (`CREDENTIAL_ENCRYPTION_KEY`), to register MCP servers that need a token
 
 ## Setup
 
@@ -159,6 +167,32 @@ AGENT=$(curl -sX POST $BASE/agents -H "$AUTH" -H "$JSON" -d "{
 
 Capability is granted, never inherited: omit `tool_allowlist` and the agent can call nothing, no
 matter how many tools the platform registers later.
+
+**Flow A′ — extend what the platform can do (optional).** A team can widen the set of grantable
+tools without waiting on this repository, by pointing the platform at an MCP server:
+
+```bash
+SERVER=$(curl -sX POST $BASE/mcp-servers -H "$AUTH" -H "$JSON" -d '{
+  "slug": "jira",
+  "name": "Jira MCP",
+  "url": "https://mcp.internal.example.com/jira",
+  "auth_token": "…"
+}' | jq -r .id)
+
+# Ask the server what it offers, under the names an allowlist has to use.
+curl -s $BASE/mcp-servers/$SERVER/tools -H "$AUTH" | jq '.tools[].name'
+# → "jira__search_issues"
+# → "jira__create_issue"
+
+# Granting one is the same PATCH as granting a built-in.
+curl -sX PATCH $BASE/agents/$AGENT -H "$AUTH" -H "$JSON" \
+  -d '{"tool_allowlist":["search_knowledge_base","jira__search_issues"]}'
+```
+
+Tool names are namespaced by server slug, but that is legibility rather than security: the servers
+consulted are the ones the *agent's own tenant* registered, so an allowlist entry naming another
+tenant's server resolves to nothing. The `auth_token` is write-only — stored encrypted, replayed to
+that server, and never returned by the API.
 
 **Flow B — run.**
 
@@ -265,6 +299,10 @@ Tenant-scoped routes authenticate with `Authorization: Bearer <api-key>`; admin 
 | GET | `/agents/{id}/conversations` | tenant | List the agent's threads, most recently active first |
 | GET | `/agents/{id}/conversations/{cid}/messages` | tenant | The full transcript, with per-turn citations and usage |
 | POST | `/agents/{id}/complete` | tenant | Run one turn on the agent's model, without retrieval |
+| POST | `/mcp-servers` | tenant | Register a remote MCP server (config-as-data) |
+| GET | `/mcp-servers` | tenant | List the tenant's MCP servers |
+| GET | `/mcp-servers/{id}/tools` | tenant | Discover its tools, under the names an allowlist uses |
+| GET/PATCH/DELETE | `/mcp-servers/{id}` | tenant | Fetch, update, or remove a server |
 | POST | `/collections/{id}/documents` | tenant | Upload a pdf/txt/markdown document |
 | GET | `/collections/{id}/documents` | tenant | List documents with chunk counts |
 | DELETE | `/documents/{id}` | tenant | Delete a document and its chunks |
@@ -309,6 +347,34 @@ Request/response contracts: `app/models/schemas.py`.
 - **A tool's scope comes from the agent row, never from an argument.** Arguments are filtered to
   the tool's declared parameters, so there is no `collection_id` for an injected instruction to
   supply. Isolation cannot be argued out of.
+- **An MCP tool is an ordinary tool.** Discovery produces the same `Tool` objects the built-ins
+  register, so the allowlist, the argument filter, the step cap, and the citation logic are
+  unchanged and the tool loop cannot tell a remote tool from a local one. MCP is a *source* of
+  tools, not a second kind of tool.
+- **Remote tool names are namespaced; tenancy is what makes that safe.** `jira__search_issues` is
+  legible, but an allowlist entry naming another tenant's server resolves to nothing, because the
+  servers consulted are the ones the agent's own tenant registered. The `__` separator does buy one
+  guarantee outright: no built-in name contains it, so a hostile server cannot shadow
+  `search_knowledge_base`.
+- **A tool name a provider would reject is dropped, not sanitised.** MCP permits `weather.forecast`;
+  OpenAI does not, and an illegal name fails the *whole* request rather than that one tool. The
+  64-character ceiling is the strictest provider's, not the current one's — the model is a `PATCH`
+  away from changing.
+- **No stdio MCP transport.** Launching a server as a subprocess would make a tenant-editable
+  command string arbitrary code execution on the platform's hosts. Remote HTTP only, so there is no
+  field through which to ask.
+- **Tenant-supplied URLs are checked by address, before every connection.** The platform dials these
+  itself, from inside its own network, with its own cloud identity — so private, loopback,
+  link-local, and reserved addresses are refused. Checking hostnames would be theatre: a name
+  resolves to whatever its owner wants, and a host that was public at registration can be
+  re-pointed afterwards.
+- **Third-party credentials are encrypted, not hashed.** An API key the platform issues is only ever
+  verified, so it is hashed. A credential for somebody else's server has to be replayed on every
+  call, so it cannot be — it is encrypted under a key held outside the database, and with no key
+  configured the platform refuses to store one rather than writing it in the clear.
+- **A broken integration costs its tools, not the turn.** An unreachable MCP server contributes no
+  tools and a logged reason; failures are cached like successes, so one outage does not add its
+  timeout to every model call in the tenant.
 - **Retrieved text goes in the user turn, never the system prompt.** Uploaded documents are data,
   not instructions; a chunk reading "ignore your previous instructions" must arrive as a quoted
   string rather than an elevated directive.
