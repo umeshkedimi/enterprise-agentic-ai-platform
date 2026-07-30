@@ -10,6 +10,13 @@ production, including agents whose owners never asked for it.
 Tools are declared here and resolved per request, so granting one is a `PATCH`
 on an agent rather than a deployment — the same property the rest of the platform
 is built around.
+
+This module holds only what the *platform* ships: registration is an import-time,
+process-wide, synchronous affair. Tools discovered on a tenant's MCP server are
+built as the same `Tool` objects but never enter this registry, because they are
+scoped to one tenant and can change between two requests. Turning an allowlist
+into callable tools therefore lives in `app/tools/resolution.py`, which consults
+both.
 """
 
 import json
@@ -106,29 +113,6 @@ def get_tool(name: str) -> Tool | None:
 
 def available_tools() -> list[str]:
     return sorted(_REGISTRY)
-
-
-def resolve_tools(allowlist: list[str], *, agent_id: str = "") -> list[Tool]:
-    """Resolve an agent's allowlist to the tools it may actually call.
-
-    An allowlisted name the platform no longer registers is skipped with a log
-    rather than raising. A tool can be retired for reasons that have nothing to
-    do with the agents referencing it, and a stale name in stored configuration
-    should not take a working assistant offline — the platform's job is to keep a
-    configured agent runnable.
-    """
-    resolved: list[Tool] = []
-    unknown: list[str] = []
-    for name in allowlist:
-        tool = _REGISTRY.get(name)
-        if tool is None:
-            unknown.append(name)
-        else:
-            resolved.append(tool)
-
-    if unknown:
-        logger.warning("tool_allowlist_unknown_entries", agent_id=agent_id, tools=unknown)
-    return resolved
 
 
 def _parse_json_object(raw: str | None) -> dict[str, Any]:

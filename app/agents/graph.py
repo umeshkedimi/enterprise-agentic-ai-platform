@@ -28,7 +28,8 @@ from app.models.agent import Agent
 from app.services.completion_service import DeltaHandler, TokenUsage, Turn, complete
 from app.services.errors import RetrievalError
 from app.services.retrieval_service import semantic_search
-from app.tools.registry import Tool, ToolContext, resolve_tools
+from app.tools.registry import Tool, ToolContext
+from app.tools.resolution import resolve_agent_tools
 
 logger = get_logger(__name__)
 
@@ -147,8 +148,15 @@ async def generate_node(state: AgentState, runtime: Runtime[OrchestrationContext
     # Resolved per pass, so exhausting the step budget removes the tools from the
     # request rather than merely ignoring a call the model was still invited to
     # make. A model offered a tool it is not allowed to use will keep asking.
+    #
+    # Resolution became async once tools could live on another team's server. The
+    # repeat cost across passes of one turn is a cache lookup, not a round trip —
+    # and resolving per pass rather than once is what keeps the agent reading its
+    # *current* configuration, the same reason the agent row travels in context.
     tools = (
-        resolve_tools(agent.tool_allowlist, agent_id=str(agent.id))
+        await resolve_agent_tools(
+            agent=agent, session=runtime.context.session, settings=runtime.context.settings
+        )
         if state.get("tool_steps", 0) < MAX_TOOL_STEPS
         else []
     )
@@ -190,7 +198,12 @@ async def generate_node(state: AgentState, runtime: Runtime[OrchestrationContext
 async def tools_node(state: AgentState, runtime: Runtime[OrchestrationContext]) -> dict:
     """Run the tools the model asked for and hand the results back to it."""
     agent = runtime.context.agent
-    allowed = {t.name: t for t in resolve_tools(agent.tool_allowlist, agent_id=str(agent.id))}
+    allowed = {
+        t.name: t
+        for t in await resolve_agent_tools(
+            agent=agent, session=runtime.context.session, settings=runtime.context.settings
+        )
+    }
 
     # Shared across this round's calls so a retrieval tool can number its sources
     # from what the turn already holds, and so what it finds reaches the
