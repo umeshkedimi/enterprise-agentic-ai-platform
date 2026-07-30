@@ -11,6 +11,7 @@ from app.models.agent import (
     DEFAULT_TEMPERATURE,
 )
 from app.models.document import DocumentStatus
+from app.models.mcp import DEFAULT_MCP_TIMEOUT_SECONDS
 
 # A url-safe slug shape, reused wherever a caller names a resource. Constrained
 # so a slug can be trusted downstream (URLs, logs) without escaping.
@@ -73,6 +74,76 @@ class CollectionResponse(BaseModel):
     name: str
     description: str | None
     created_at: datetime
+
+
+class McpServerCreate(BaseModel):
+    # A tighter slug than elsewhere: this one becomes the namespace prefix on
+    # every tool the server exposes, and `slug__tool_name` has to fit inside the
+    # provider limit on function names.
+    slug: str = Field(min_length=1, max_length=31, pattern=r"^[a-z0-9][a-z0-9-]*$")
+    name: str = Field(min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=2000)
+    # Streamable HTTP only. The MCP spec also allows launching a server as a
+    # subprocess, which on a multi-tenant platform is tenant-configurable command
+    # execution — so there is no field here through which to ask for it.
+    url: str = Field(min_length=1, max_length=2048)
+    # Write-only. Stored encrypted and never returned; the platform has to replay
+    # it to the server, so unlike an API key it cannot be hashed.
+    auth_token: str | None = Field(default=None, min_length=1, max_length=4096)
+    headers: dict[str, str] = Field(default_factory=dict)
+    timeout_seconds: int = Field(default=DEFAULT_MCP_TIMEOUT_SECONDS, ge=1, le=120)
+    enabled: bool = True
+
+
+class McpServerUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=2000)
+    url: str | None = Field(default=None, min_length=1, max_length=2048)
+    # An empty string clears the stored credential; omitting the field leaves it
+    # untouched. A partial update must not silently drop a secret it never saw.
+    auth_token: str | None = Field(default=None, max_length=4096)
+    headers: dict[str, str] | None = None
+    timeout_seconds: int | None = Field(default=None, ge=1, le=120)
+    enabled: bool | None = None
+
+
+class McpServerResponse(BaseModel):
+    id: uuid.UUID
+    slug: str
+    name: str
+    description: str | None
+    url: str
+    # Whether a credential is stored, never the credential. Enough to answer "is
+    # this configured?" without the answer being usable.
+    authenticated: bool
+    headers: dict[str, str]
+    timeout_seconds: int
+    enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class McpToolResponse(BaseModel):
+    """A tool discovered on a server, as an agent would have to name it.
+
+    `name` is the namespaced form — that is the string a `tool_allowlist` entry
+    has to match, and the reason this endpoint exists: a team owner needs to know
+    what to grant before they can grant it.
+    """
+
+    name: str
+    description: str
+
+
+class McpDiscoveryResponse(BaseModel):
+    server_id: uuid.UUID
+    slug: str
+    reachable: bool
+    tools: list[McpToolResponse]
+    # Present when `reachable` is false. A team owner debugging their own
+    # integration needs to know whether the platform could not connect, could not
+    # authenticate, or connected and was told nothing.
+    error: str | None = None
 
 
 class AgentCreate(BaseModel):

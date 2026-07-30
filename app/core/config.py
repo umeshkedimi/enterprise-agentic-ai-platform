@@ -22,6 +22,23 @@ class Settings(BaseSettings):
     # operator sets it: an unset secret must never mean "no auth required".
     platform_admin_token: str = ""
 
+    # Fernet key for credentials the platform has to replay rather than verify —
+    # today, MCP server tokens. Empty by default and fails closed: registering a
+    # server with a credential is refused until an operator sets it, rather than
+    # the token being written in the clear. Generate with:
+    #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    credential_encryption_key: str = ""
+
+    # Whether a tenant-registered MCP URL may resolve to a private, loopback, or
+    # link-local address. Off by default because the platform dials these URLs
+    # itself, from inside the network, holding its own cloud identity. Local
+    # development turns it on to reach an MCP server on localhost.
+    mcp_allow_private_addresses: bool = False
+    # How long a discovered tool list is reused before the server is asked again.
+    # Discovery is a round trip per server per model call, and a tool list is not
+    # something that changes between two turns of one conversation.
+    mcp_tool_cache_ttl_seconds: int = 300
+
     llm_provider: Literal["openai", "azure"] = "openai"
 
     openai_api_key: str = ""

@@ -49,6 +49,23 @@ class ModelInvocationError(DomainError):
     """The upstream provider failed to complete the request (→ 502)."""
 
 
+class UnsafeServerUrlError(DomainError):
+    """A tenant-supplied URL the platform will not dial (→ 400).
+
+    The tenant's configuration mistake, or their attempt at one: the platform
+    fetches this URL itself, from inside its own network, so a host resolving to
+    a loopback or link-local address is refused rather than tried.
+    """
+
+
+class CredentialStorageUnavailableError(DomainError):
+    """No encryption key is configured, so a credential cannot be stored (→ 503).
+
+    The operator's unfinished wiring, like `ProviderNotConfiguredError`. The
+    request is refused rather than downgraded to storing the secret in plaintext.
+    """
+
+
 class RetrievalError(DomainError):
     """Evidence could not be gathered for a grounded answer (→ 502).
 
