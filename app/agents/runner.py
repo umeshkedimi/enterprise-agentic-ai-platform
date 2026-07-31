@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.graph import TOKEN_EVENT, TOOL_EVENT, get_agent_graph
 from app.agents.state import AgentState, OrchestrationContext
+from app.core import metrics, tracing
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
 from app.models.agent import Agent
@@ -72,6 +73,51 @@ def _turn_state(question: str, history: Sequence[Turn]) -> AgentState:
     }
 
 
+def _turn_attributes(agent: Agent, conversation_id: uuid.UUID | None, streamed: bool) -> dict:
+    """What the turn's root span says about who it belongs to.
+
+    Everything a metric label is forbidden to carry, a span carries here. That
+    is the division of labour between the two: a counter says the platform's
+    error rate rose, and a span says it rose for this tenant, this agent, and
+    this conversation — because a span is sampled and expires, and a label is a
+    series that never does.
+    """
+    return {
+        tracing.TENANT_ID: str(agent.tenant_id),
+        tracing.AGENT_ID: str(agent.id),
+        tracing.AGENT_SLUG: agent.slug,
+        tracing.CONVERSATION_ID: str(conversation_id) if conversation_id else None,
+        tracing.COLLECTION_ID: str(agent.collection_id) if agent.collection_id else None,
+        tracing.GEN_AI_REQUEST_MODEL: agent.model,
+        tracing.STREAMED: streamed,
+    }
+
+
+def _record_turn_metrics(
+    *, streamed: bool, started: float, error: BaseException | None = None
+) -> None:
+    """Count one turn, at the boundary that owns the whole of it.
+
+    A turn is the unit an operator reasons about — it is what a user waited for
+    and what a tenant is billed for — and it is not the same as a model call or
+    an HTTP request. One turn can be several model calls; one HTTP request can
+    be a turn that failed before the graph started.
+
+    The error label is an exception class name. That is bounded by the code
+    rather than by anything a caller can type, and it is the breakdown that says
+    whose problem a failure is: `ProviderNotConfiguredError` is the operator's,
+    `ModelConfigurationError` is a tenant's, `RetrievalError` is neither's until
+    you look. A refusal that never entered the graph — a disabled agent — is
+    deliberately absent: a turn that did not run is not a slow turn, and folding
+    it in would pull the duration histogram toward zero.
+    """
+    label = str(streamed).lower()
+    metrics.AGENT_TURNS.labels("error" if error else "ok", label).inc()
+    metrics.AGENT_TURN_DURATION.labels(label).observe(time.perf_counter() - started)
+    if error is not None:
+        metrics.AGENT_TURN_ERRORS.labels(type(error).__name__).inc()
+
+
 def _thread_config(conversation_id: uuid.UUID | None) -> dict:
     """Bind this run to a checkpoint thread, when there is one to bind to.
 
@@ -110,14 +156,24 @@ async def run_turn(
     context = OrchestrationContext(agent=agent, session=session, settings=settings)
 
     started = time.perf_counter()
-    # No blanket try/except here on purpose. Every failure the nodes can
-    # anticipate is already a DomainError by the time it reaches this line, so
-    # anything else is a bug — and turning a bug into a tidy 502 would hide it
-    # behind a status code that says "the provider is having a bad day".
-    final = await get_agent_graph().ainvoke(
-        _turn_state(question, history), context=context, config=_thread_config(conversation_id)
-    )
+    # Still no blanket try/except that *handles* anything. Every failure the
+    # nodes can anticipate is already a DomainError by the time it reaches this
+    # line, so anything else is a bug — and turning a bug into a tidy 502 would
+    # hide it behind a status code that says "the provider is having a bad day".
+    # This one counts and re-raises, which changes what an operator sees and not
+    # what a caller does.
+    try:
+        with tracing.span("agent.turn", **_turn_attributes(agent, conversation_id, False)):
+            final = await get_agent_graph().ainvoke(
+                _turn_state(question, history),
+                context=context,
+                config=_thread_config(conversation_id),
+            )
+    except Exception as exc:
+        _record_turn_metrics(streamed=False, started=started, error=exc)
+        raise
     latency_ms = int((time.perf_counter() - started) * 1000)
+    _record_turn_metrics(streamed=False, started=started)
 
     chunks = final.get("chunks", [])
     logger.info(
@@ -183,22 +239,35 @@ async def stream_turn(
 
     final: dict = {}
     started = time.perf_counter()
-    async for mode, payload in get_agent_graph().astream(
-        _turn_state(question, history),
-        context=context,
-        config=_thread_config(conversation_id),
-        # "values" alongside "custom" because the nodes narrate but do not
-        # return; the last state snapshot is what the result is built from.
-        stream_mode=["custom", "values"],
-    ):
-        if mode == "values":
-            final = payload
-        elif payload.get("type") == TOKEN_EVENT:
-            yield TokenChunk(text=payload["text"])
-        elif payload.get("type") == TOOL_EVENT:
-            yield ToolStarted(name=payload["name"])
+    try:
+        # A span held open across `yield`s. Python has no per-generator context,
+        # so the span stays current in the consumer between yields as well — and
+        # that is harmless here, because each request runs in its own task with
+        # its own copied context, and nothing downstream of the yield opens a
+        # span of its own. The alternative, re-attaching the context on every
+        # resumption, would buy nothing but a way to get it wrong.
+        with tracing.span("agent.turn", **_turn_attributes(agent, conversation_id, True)):
+            async for mode, payload in get_agent_graph().astream(
+                _turn_state(question, history),
+                context=context,
+                config=_thread_config(conversation_id),
+                # "values" alongside "custom" because the nodes narrate but do
+                # not return; the last state snapshot is what the result is
+                # built from.
+                stream_mode=["custom", "values"],
+            ):
+                if mode == "values":
+                    final = payload
+                elif payload.get("type") == TOKEN_EVENT:
+                    yield TokenChunk(text=payload["text"])
+                elif payload.get("type") == TOOL_EVENT:
+                    yield ToolStarted(name=payload["name"])
+    except Exception as exc:
+        _record_turn_metrics(streamed=True, started=started, error=exc)
+        raise
 
     latency_ms = int((time.perf_counter() - started) * 1000)
+    _record_turn_metrics(streamed=True, started=started)
     chunks = final.get("chunks", [])
     logger.info(
         "agent_turn_completed",

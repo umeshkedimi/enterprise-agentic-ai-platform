@@ -26,6 +26,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import metrics
 from app.core.logging import get_logger
 from app.models.agent import Agent
 from app.services.retrieval_service import RetrievedChunk
@@ -64,6 +65,17 @@ class Tool:
     description: str
     parameters: dict[str, Any]
     handler: ToolHandler
+    # Whether this tool lives on a tenant's MCP server. Nothing about *running*
+    # a tool consults it — that is still the point of the MCP design, that the
+    # graph cannot tell the two apart — but a metric label has to be a value the
+    # platform chose, and a remote tool's name is a value a tenant typed. This
+    # flag is what lets the counter say `mcp` instead of minting a series per
+    # tool name somebody else invented.
+    remote: bool = False
+
+    @property
+    def metric_label(self) -> str:
+        return metrics.tool_label(self.name, remote=self.remote)
 
     def to_schema(self) -> dict[str, Any]:
         """Render as an OpenAI-style function schema, which LiteLLM translates

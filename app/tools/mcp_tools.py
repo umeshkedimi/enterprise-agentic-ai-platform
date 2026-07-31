@@ -28,6 +28,7 @@ import httpx2
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 
+from app.core import metrics, tracing
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.core.net import UnsafeUrlError, validate_outbound_url
@@ -214,14 +215,42 @@ async def discover(
     if use_cache:
         cached = _CACHE.get(key)
         if cached and cached[0] > monotonic():
+            # Counted, and deliberately kept out of the duration histogram: a
+            # cache hit is not a fast discovery, it is the absence of one, and
+            # mixing the two would report a latency that no server ever served.
+            # The ratio of this counter to the rest is what says whether the TTL
+            # is earning its keep.
+            metrics.MCP_DISCOVERY.labels("cache_hit").inc()
             return cached[1]
 
+    started = monotonic()
+    # Named on the span, not on the metric: a server slug is a tenant's own
+    # string, and there is no bound on how many of them a platform accumulates.
+    with tracing.span("mcp.discover", **{tracing.MCP_SERVER_SLUG: server.slug}):
+        discovery, outcome = await _discover_uncached(server, settings)
+
+    metrics.MCP_DISCOVERY.labels(outcome).inc()
+    metrics.MCP_DISCOVERY_DURATION.observe(monotonic() - started)
+
+    # Failures are cached too, for the same TTL. A server that is down would
+    # otherwise be dialled on every model call of every turn, adding its timeout
+    # to each one — an outage on one integration becoming a latency problem for
+    # every agent in the tenant.
+    _CACHE[key] = (monotonic() + settings.mcp_tool_cache_ttl_seconds, discovery)
+    return discovery
+
+
+async def _discover_uncached(server: McpServer, settings: Settings) -> tuple[Discovery, str]:
+    """One real lookup, and the word for how it went."""
     try:
         async with _connect(server, settings) as client:
             listed = await client.list_tools()
-        discovery = Discovery(tools=_to_tools(server, listed.tools, settings))
+        return Discovery(tools=_to_tools(server, listed.tools, settings)), "ok"
     except UnsafeUrlError as exc:
-        discovery = Discovery(error=str(exc))
+        # Distinguished from a failure because the causes are different people's
+        # problems: `blocked` is the platform refusing to dial a URL, `error` is
+        # a server the platform tried to reach and could not.
+        return Discovery(error=str(exc)), "blocked"
     except Exception as exc:  # noqa: BLE001 - transport, protocol, and timeout types
         logger.warning(
             "mcp_discovery_failed",
@@ -230,14 +259,7 @@ async def discover(
             slug=server.slug,
             error=type(exc).__name__,
         )
-        discovery = Discovery(error=f"{type(exc).__name__}: {exc}")
-
-    # Failures are cached too, for the same TTL. A server that is down would
-    # otherwise be dialled on every model call of every turn, adding its timeout
-    # to each one — an outage on one integration becoming a latency problem for
-    # every agent in the tenant.
-    _CACHE[key] = (monotonic() + settings.mcp_tool_cache_ttl_seconds, discovery)
-    return discovery
+        return Discovery(error=f"{type(exc).__name__}: {exc}"), "error"
 
 
 def _to_tools(server: McpServer, remote_tools: list[Any], settings: Settings) -> list[Tool]:
@@ -254,6 +276,7 @@ def _to_tools(server: McpServer, remote_tools: list[Any], settings: Settings) ->
                 description=(remote.description or "")[:MAX_DESCRIPTION_CHARS],
                 parameters=remote.input_schema or _EMPTY_SCHEMA,
                 handler=_make_handler(server, remote.name, settings),
+                remote=True,
             )
         )
 

@@ -13,8 +13,9 @@ from typing import Any, Literal
 
 import litellm
 
+from app.core import metrics, tracing
 from app.core.config import Settings, get_settings
-from app.core.llm import UnknownModelError, resolve_model_route
+from app.core.llm import ModelRoute, UnknownModelError, resolve_model_route
 from app.core.logging import get_logger
 from app.models.agent import Agent
 from app.services.errors import (
@@ -154,6 +155,33 @@ async def _invoke(params: dict[str, Any], on_delta: DeltaHandler | None) -> Any:
     return rebuilt
 
 
+def _record_call(
+    route: ModelRoute,
+    streamed: str,
+    outcome: str,
+    elapsed: float,
+    usage: TokenUsage | None = None,
+) -> None:
+    """Count one provider call, at the only layer that sees all of them.
+
+    Not in the graph and not in the runner: a turn with a tool loop makes
+    several calls and pays for all of them, so metrics taken once per turn would
+    understate exactly the turns that cost the most.
+
+    The labels are `provider` and `model` and nothing else. Both are values
+    LiteLLM's model map has already vouched for — an unroutable model raises
+    before it reaches here, so a tenant cannot mint a time series by typing a
+    model name into their agent config.
+    """
+    metrics.LLM_REQUESTS.labels(route.provider, route.model, outcome).inc()
+    metrics.LLM_DURATION.labels(route.provider, route.model, streamed).observe(elapsed)
+    if usage is not None:
+        metrics.LLM_TOKENS.labels(route.provider, route.model, "prompt").inc(usage.prompt_tokens)
+        metrics.LLM_TOKENS.labels(route.provider, route.model, "completion").inc(
+            usage.completion_tokens
+        )
+
+
 async def complete(
     *,
     agent: Agent,
@@ -240,28 +268,62 @@ async def complete(
             temperature=agent.temperature,
         )
 
+    streamed = on_delta is not None
+    streamed_label = str(streamed).lower()
     started = time.perf_counter()
-    try:
-        response = await _invoke(params, on_delta)
-    except ModelInvocationError:
-        raise
-    except Exception as exc:  # noqa: BLE001 - LiteLLM surfaces provider-specific types
-        logger.warning(
-            "completion_failed",
-            agent_id=str(agent.id),
-            model=route.model,
-            provider=route.provider,
-            error=type(exc).__name__,
-        )
-        raise ModelInvocationError(str(exc)) from exc
-    latency_ms = int((time.perf_counter() - started) * 1000)
 
-    message = response.choices[0].message
-    # Absent on a response that carried only tool calls; an empty string keeps
-    # the contract total rather than making every caller handle None.
-    text = message.content or ""
-    tool_calls = _extract_tool_calls(message)
-    usage = _extract_usage(response)
+    # Named `chat <model>` and attributed with the GenAI conventions, so a
+    # tracing backend recognises this as a model call and charts its tokens
+    # without anyone configuring it to. Note what is *not* here: no prompt, no
+    # completion text, no retrieved passages. Spans leave the process, and a
+    # span carrying prompt content would take one tenant's documents with it.
+    with tracing.span(
+        f"chat {route.model}",
+        **{
+            tracing.GEN_AI_OPERATION: "chat",
+            tracing.GEN_AI_SYSTEM: route.provider,
+            tracing.GEN_AI_REQUEST_MODEL: route.model,
+            tracing.GEN_AI_REQUEST_MAX_TOKENS: agent.max_output_tokens,
+            tracing.GEN_AI_REQUEST_TEMPERATURE: params.get("temperature"),
+            tracing.AGENT_ID: str(agent.id),
+            tracing.TENANT_ID: str(agent.tenant_id),
+            tracing.STREAMED: streamed,
+        },
+    ) as current:
+        try:
+            response = await _invoke(params, on_delta)
+        except ModelInvocationError:
+            _record_call(route, streamed_label, "error", time.perf_counter() - started)
+            raise
+        except Exception as exc:  # noqa: BLE001 - LiteLLM surfaces provider-specific types
+            logger.warning(
+                "completion_failed",
+                agent_id=str(agent.id),
+                model=route.model,
+                provider=route.provider,
+                error=type(exc).__name__,
+            )
+            _record_call(route, streamed_label, "error", time.perf_counter() - started)
+            raise ModelInvocationError(str(exc)) from exc
+        elapsed = time.perf_counter() - started
+        latency_ms = int(elapsed * 1000)
+
+        message = response.choices[0].message
+        # Absent on a response that carried only tool calls; an empty string keeps
+        # the contract total rather than making every caller handle None.
+        text = message.content or ""
+        tool_calls = _extract_tool_calls(message)
+        usage = _extract_usage(response)
+
+        _record_call(route, streamed_label, "ok", elapsed, usage)
+        tracing.set_attributes(
+            current,
+            **{
+                tracing.GEN_AI_RESPONSE_MODEL: getattr(response, "model", None),
+                tracing.GEN_AI_INPUT_TOKENS: usage.prompt_tokens,
+                tracing.GEN_AI_OUTPUT_TOKENS: usage.completion_tokens,
+            },
+        )
 
     logger.info(
         "completion_succeeded",
@@ -272,7 +334,7 @@ async def complete(
         prompt_tokens=usage.prompt_tokens,
         completion_tokens=usage.completion_tokens,
         tool_calls=len(tool_calls),
-        streamed=on_delta is not None,
+        streamed=streamed,
         latency_ms=latency_ms,
     )
 

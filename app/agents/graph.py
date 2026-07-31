@@ -13,6 +13,8 @@ tool loop, and per-node spans for tracing. Each of those is an edge or a
 compile-time argument on this structure, and none of them is a rewrite.
 """
 
+import time
+
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
 
@@ -23,6 +25,7 @@ from app.agents.prompts import (
     build_grounded_question,
 )
 from app.agents.state import AgentState, OrchestrationContext
+from app.core import metrics, tracing
 from app.core.logging import get_logger
 from app.models.agent import Agent
 from app.services.completion_service import DeltaHandler, TokenUsage, Turn, complete
@@ -36,6 +39,12 @@ logger = get_logger(__name__)
 RETRIEVE = "retrieve"
 GENERATE = "generate"
 TOOLS = "tools"
+
+# One span per node, named after the node. This is what makes a trace legible as
+# the graph rather than as a flat list of provider calls: a turn that looped
+# twice shows two `agent.generate` spans with an `agent.tools` between them, and
+# the shape of the tree is the shape of the run.
+NODE_SPANS = {RETRIEVE: "agent.retrieve", GENERATE: "agent.generate", TOOLS: "agent.tools"}
 
 # Names for the two things a caller watching a turn can be told while it runs.
 # A tool event exists because the pause it explains — a second retrieval, a
@@ -59,12 +68,13 @@ async def retrieve_node(state: AgentState, runtime: Runtime[OrchestrationContext
     """
     agent = runtime.context.agent
     try:
-        chunks = await semantic_search(
-            runtime.context.session,
-            state["question"],
-            collection_id=agent.collection_id,
-            top_k=agent.retrieval_top_k,
-        )
+        with tracing.span(NODE_SPANS[RETRIEVE]):
+            chunks = await semantic_search(
+                runtime.context.session,
+                state["question"],
+                collection_id=agent.collection_id,
+                top_k=agent.retrieval_top_k,
+            )
     except Exception as exc:  # noqa: BLE001 - OpenAI and driver errors are provider types
         # Translated here rather than in the runner because this is the only
         # frame that knows a failure means "no evidence gathered". Failing the
@@ -144,37 +154,47 @@ async def generate_node(state: AgentState, runtime: Runtime[OrchestrationContext
     """Answer the question, or ask for a tool. Re-entered after each tool round."""
     agent = runtime.context.agent
     chunks = state.get("chunks", [])
+    steps = state.get("tool_steps", 0)
 
-    # Resolved per pass, so exhausting the step budget removes the tools from the
-    # request rather than merely ignoring a call the model was still invited to
-    # make. A model offered a tool it is not allowed to use will keep asking.
-    #
-    # Resolution became async once tools could live on another team's server. The
-    # repeat cost across passes of one turn is a cache lookup, not a round trip —
-    # and resolving per pass rather than once is what keeps the agent reading its
-    # *current* configuration, the same reason the agent row travels in context.
-    tools = (
-        await resolve_agent_tools(
-            agent=agent, session=runtime.context.session, settings=runtime.context.settings
+    with tracing.span(
+        NODE_SPANS[GENERATE],
+        **{
+            tracing.AGENT_SLUG: agent.slug,
+            tracing.RETRIEVED_CHUNKS: len(chunks),
+            tracing.TOOL_STEPS: steps,
+        },
+    ):
+        # Resolved per pass, so exhausting the step budget removes the tools from
+        # the request rather than merely ignoring a call the model was still
+        # invited to make. A model offered a tool it may not use will keep asking.
+        #
+        # Resolution became async once tools could live on another team's server.
+        # The repeat cost across passes of one turn is a cache lookup, not a round
+        # trip — and resolving per pass rather than once is what keeps the agent
+        # reading its *current* configuration, the same reason the agent row
+        # travels in context.
+        tools = (
+            await resolve_agent_tools(
+                agent=agent, session=runtime.context.session, settings=runtime.context.settings
+            )
+            if steps < MAX_TOOL_STEPS
+            else []
         )
-        if state.get("tool_steps", 0) < MAX_TOOL_STEPS
-        else []
-    )
 
-    turns = [
-        *state.get("history", []),
-        Turn(role="user", content=build_grounded_question(state["question"], chunks)),
-    ]
+        turns = [
+            *state.get("history", []),
+            Turn(role="user", content=build_grounded_question(state["question"], chunks)),
+        ]
 
-    completion = await complete(
-        agent=agent,
-        turns=turns,
-        system_directives=_directives(agent, state, tools),
-        tools=[t.to_schema() for t in tools],
-        scratchpad=state.get("scratchpad", []),
-        on_delta=_delta_writer(runtime),
-        settings=runtime.context.settings,
-    )
+        completion = await complete(
+            agent=agent,
+            turns=turns,
+            system_directives=_directives(agent, state, tools),
+            tools=[t.to_schema() for t in tools],
+            scratchpad=state.get("scratchpad", []),
+            on_delta=_delta_writer(runtime),
+            settings=runtime.context.settings,
+        )
 
     update: dict = {
         "answer": completion.text,
@@ -195,15 +215,46 @@ async def generate_node(state: AgentState, runtime: Runtime[OrchestrationContext
     return update
 
 
+async def _execute_call(call, tool: Tool, context: ToolContext, agent: Agent) -> str:
+    """Run one permitted tool call and return the text the model will read.
+
+    Extracted from the loop below because the loop's job is the allowlist and
+    this one's is the measurement: a span naming the tool exactly, a counter
+    naming it only as much as a metric label safely can.
+    """
+    label = tool.metric_label
+    started = time.perf_counter()
+    # The span names the tool and the metric does not, and that asymmetry is the
+    # whole argument for keeping both signals. A `jira__search_issues` a tenant
+    # added last week is unusable as a label and indispensable as an attribute.
+    with tracing.span(
+        f"tool {label}", **{tracing.TOOL_NAME: call.name, tracing.TOOL_REMOTE: tool.remote}
+    ):
+        try:
+            output = await tool.handler(context, **tool.arguments_from(call.arguments))
+            outcome = "ok"
+        except Exception as exc:  # noqa: BLE001 - handlers touch DB and providers
+            # Returned to the model rather than raised: a failing tool is a fact
+            # the model can work around by answering from what it already has,
+            # and losing the whole turn to it would be worse.
+            logger.warning(
+                "tool_execution_failed",
+                agent_id=str(agent.id),
+                tool=call.name,
+                error=type(exc).__name__,
+            )
+            outcome = "error"
+            output = f"Tool '{call.name}' failed and returned no result."
+
+    metrics.TOOL_CALLS.labels(label, outcome).inc()
+    metrics.TOOL_DURATION.labels(label).observe(time.perf_counter() - started)
+    return output
+
+
 async def tools_node(state: AgentState, runtime: Runtime[OrchestrationContext]) -> dict:
     """Run the tools the model asked for and hand the results back to it."""
     agent = runtime.context.agent
-    allowed = {
-        t.name: t
-        for t in await resolve_agent_tools(
-            agent=agent, session=runtime.context.session, settings=runtime.context.settings
-        )
-    }
+    calls = state.get("pending_calls", [])
 
     # Shared across this round's calls so a retrieval tool can number its sources
     # from what the turn already holds, and so what it finds reaches the
@@ -213,41 +264,47 @@ async def tools_node(state: AgentState, runtime: Runtime[OrchestrationContext]) 
 
     results: list[dict] = []
     used: list[str] = []
-    for call in state.get("pending_calls", []):
-        if runtime.context.stream:
-            # Announced before it runs, not after. The point of the event is to
-            # explain a pause a caller is already sitting through.
-            runtime.stream_writer({"type": TOOL_EVENT, "name": call.name})
-        tool = allowed.get(call.name)
-        if tool is None:
-            # The allowlist is enforced here, at execution, not only by omitting
-            # the schema from the request. A model can hallucinate a tool name,
-            # and a prompt injection can suggest one — neither may be enough to
-            # run something this agent was not granted.
-            logger.warning(
-                "tool_call_denied",
-                agent_id=str(agent.id),
-                tenant_id=str(agent.tenant_id),
-                tool=call.name,
+    with tracing.span(NODE_SPANS[TOOLS], **{"eaap.tool_calls": len(calls)}):
+        # Inside the span because resolution can dial a tenant's MCP server, and
+        # a slow third party discovered on the way to running a tool is exactly
+        # the latency a trace should attribute rather than hide.
+        allowed = {
+            t.name: t
+            for t in await resolve_agent_tools(
+                agent=agent, session=runtime.context.session, settings=runtime.context.settings
             )
-            output = f"Tool '{call.name}' is not available to this agent."
-        else:
-            try:
-                output = await tool.handler(context, **tool.arguments_from(call.arguments))
-            except Exception as exc:  # noqa: BLE001 - handlers touch DB and providers
-                # Returned to the model rather than raised: a failing tool is a
-                # fact the model can work around by answering from what it
-                # already has, and losing the whole turn to it would be worse.
-                logger.warning(
-                    "tool_execution_failed",
-                    agent_id=str(agent.id),
-                    tool=call.name,
-                    error=type(exc).__name__,
-                )
-                output = f"Tool '{call.name}' failed and returned no result."
-            used.append(call.name)
+        }
 
-        results.append({"role": "tool", "tool_call_id": call.id, "content": output})
+        for call in calls:
+            if runtime.context.stream:
+                # Announced before it runs, not after. The point of the event is
+                # to explain a pause a caller is already sitting through.
+                runtime.stream_writer({"type": TOOL_EVENT, "name": call.name})
+
+            tool = allowed.get(call.name)
+            if tool is None:
+                # The allowlist is enforced here, at execution, not only by
+                # omitting the schema from the request. A model can hallucinate a
+                # tool name and a prompt injection can suggest one — neither may
+                # be enough to run something this agent was not granted.
+                logger.warning(
+                    "tool_call_denied",
+                    agent_id=str(agent.id),
+                    tenant_id=str(agent.tenant_id),
+                    tool=call.name,
+                )
+                # Counted under a fixed label rather than under `call.name`.
+                # These names were invented by a model or suggested by an
+                # injected instruction, which makes them the least bounded
+                # strings in the system and the worst imaginable metric label.
+                # The name itself is in the log line above.
+                metrics.TOOL_CALLS.labels(metrics.TOOL_LABEL_UNKNOWN, "denied").inc()
+                output = f"Tool '{call.name}' is not available to this agent."
+            else:
+                output = await _execute_call(call, tool, context, agent)
+                used.append(call.name)
+
+            results.append({"role": "tool", "tool_call_id": call.id, "content": output})
 
     return {
         "scratchpad": [*state.get("scratchpad", []), *results],
