@@ -6,10 +6,12 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.agents.checkpointer import start_checkpointer, stop_checkpointer
-from app.api import agents, collections, documents, health, mcp_servers, tenants
+from app.api import agents, collections, documents, health, mcp_servers, metrics, tenants
+from app.core import metrics as metrics_registry
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging, get_logger
 from app.core.middleware import RequestContextMiddleware
+from app.core.tracing import configure_tracing, instrument_app, shutdown_tracing
 from app.db.session import engine
 
 logger = get_logger(__name__)
@@ -31,7 +33,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     importing a module, and it must be closed on the way out.
     """
     settings = get_settings()
+    # Tracing before logging, so the processor that stamps trace ids onto log
+    # lines has a provider to read from by the time the first line is emitted.
+    configure_tracing(settings)
     configure_logging(settings.log_level)
+    metrics_registry.set_build_info(settings.app_version, settings.app_env)
     await start_checkpointer(settings)
     logger.info("application_startup", app_env=settings.app_env)
 
@@ -39,6 +45,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     await stop_checkpointer()
     await engine.dispose()
+    # Last, and after the engine: the spans describing shutdown are worth
+    # keeping, and a batch processor that is never flushed drops its final
+    # window on every single deploy.
+    shutdown_tracing()
     logger.info("application_shutdown")
 
 
@@ -55,7 +65,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(
         title="Enterprise Agentic AI Platform",
         description="Platform for configuring, running, and operating AI agents across teams.",
-        version="0.1.0",
+        version=settings.app_version,
         lifespan=lifespan,
         # Interactive docs are invaluable locally and an information-disclosure
         # liability in production, where they hand an attacker a complete map of
@@ -66,8 +76,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
 
     app.add_middleware(RequestContextMiddleware)
+    # Before the first request and not in the lifespan: this patches
+    # `build_middleware_stack`, which Starlette has already called by the time a
+    # lifespan handler runs. Instrumenting there appears to work and silently
+    # produces orphan traces with no request span above them.
+    instrument_app(app, engine)
 
     app.include_router(health.router)
+    app.include_router(metrics.router)
     app.include_router(tenants.router)
     app.include_router(collections.router)
     app.include_router(agents.router)

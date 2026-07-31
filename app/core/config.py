@@ -9,7 +9,27 @@ class Settings(BaseSettings):
 
     app_env: str = "local"
     app_port: int = 8000
+    app_version: str = "0.1.0"
     log_level: str = "INFO"
+
+    # --- Observability ---
+    # `/metrics` is on by default because a platform that cannot be scraped is
+    # not operable; it is switchable for a deployment that collects some other
+    # way. Nothing it exports is tenant-scoped, which is what lets it stay
+    # unauthenticated — see the label rules in `app/core/metrics.py`.
+    metrics_enabled: bool = True
+
+    # Tracing is off until an operator names a collector. The OpenTelemetry API
+    # is safe to call with no SDK configured — spans become non-recording
+    # objects — so instrumentation stays in the code paths unconditionally and
+    # costs almost nothing when there is nowhere to send it. A checkout with no
+    # collector running must still boot.
+    otel_exporter_otlp_endpoint: str = ""
+    otel_service_name: str = "enterprise-agentic-ai-platform"
+    # Head sampling, applied per trace. One turn is one trace, and a trace that
+    # is sampled keeps all of its spans — so this is a knob on cost, not on
+    # completeness.
+    otel_traces_sample_ratio: float = 1.0
 
     database_url: str = "postgresql+asyncpg://eaap:eaap@localhost:5432/eaap"
     database_url_sync: str = "postgresql+psycopg://eaap:eaap@localhost:5432/eaap"
