@@ -9,7 +9,7 @@ behaviour entirely through the values in their rows: no branch in the code, no r
 
 Built on FastAPI, PostgreSQL/pgvector, and Redis. Today the shared runtime covers tenant isolation,
 knowledge scoping, ingestion, retrieval, multi-provider model routing, orchestration, conversation
-memory, streaming, and MCP tool integration; observability and evaluation are on the roadmap below.
+memory, streaming, MCP tool integration, and observability; evaluation is on the roadmap below.
 
 ## Status
 
@@ -63,15 +63,23 @@ explicitly marked as not-yet-built.
   transport only — no subprocess launching — tenant-supplied URLs are checked against an SSRF guard
   before every connection, and server credentials are encrypted at rest. A server that is
   unreachable costs its tools, not the turn.
+- Observability — Prometheus metrics at `/metrics` and OpenTelemetry traces over OTLP, covering the
+  units an operator actually reasons about: the turn, the model call, the vector search, the tool,
+  the MCP round trip. Metric labels are restricted to values the platform itself chose, so no tenant
+  can mint a time series and the scrape body carries nothing tenant-specific; the high-cardinality
+  detail — which tenant, which agent, which remote tool — lives on spans and in logs, which are
+  sampled and expire. Every log line carries the request id and, when tracing is on, the trace and
+  span ids, so a slow turn in a dashboard leads to a trace and a trace leads to its logs. Tracing is
+  off until an operator names a collector; the platform runs without one.
 - FastAPI application — app factory, lifespan-managed resources, request correlation IDs,
   structured JSON logging, liveness/readiness probes.
-- Postgres + pgvector and Redis via Docker Compose; Alembic migrations; multi-stage app image.
+- Postgres + pgvector and Redis via Docker Compose, with Prometheus, Grafana, and Jaeger behind an
+  `observability` profile; Alembic migrations; multi-stage app image.
 
 **Roadmap (not yet implemented)**
 
-Federated auth (OIDC/SSO) · async ingestion via Celery/RabbitMQ · OpenTelemetry tracing and
-Prometheus metrics · evaluation (groundedness, confidence calibration) · Kubernetes manifests ·
-CI/CD.
+Federated auth (OIDC/SSO) · async ingestion via Celery/RabbitMQ · evaluation (groundedness,
+confidence calibration, audit trail) · Kubernetes manifests · CI/CD.
 
 ## Architecture
 
@@ -82,7 +90,7 @@ CI/CD.
 | Tools | `app/tools` | Tool registry, per-agent capability resolution, built-in tools, MCP client |
 | Services | `app/services` | Tenancy, agent/collection config, ingestion, retrieval, conversations, completions — framework-agnostic |
 | Models | `app/models` | SQLModel tables (persistence) + Pydantic DTOs (transport) |
-| Core | `app/core` | Settings, structured logging, middleware, model routing, credential encryption, outbound-URL safety |
+| Core | `app/core` | Settings, structured logging, middleware, metrics, tracing, model routing, credential encryption, outbound-URL safety |
 | DB | `app/db` | Engine, session factory, Alembic metadata target |
 
 Dependencies run one way: `api → agents → {services, tools} → models/core/db`. Neither `app/agents` nor
@@ -101,6 +109,46 @@ product record — tenant-scoped, queryable, and the only thing history is ever 
 checkpointer is the execution record, keyed by an opaque thread id, and is what makes a turn
 resumable rather than restartable. Neither can do the other's job: a checkpoint cannot say which
 tenant owns it, and a transcript cannot resume a half-finished tool loop.
+
+### Observability
+
+Three signals, with a strict division of labour between them.
+
+**Metrics** (`/metrics`, Prometheus) answer *is the fleet healthy*. Every label is a value the
+platform chose: a route template rather than a path, a provider and a model that LiteLLM's model map
+has already vouched for, a domain-error class name, and `mcp` in place of any remote tool's name. No
+metric is labelled by tenant, agent, conversation, or collection — those are strings somebody else
+supplies, and each distinct one would be a time series that never goes away. That restraint is also
+why `/metrics` needs no authentication: a body that has aggregated its subjects away has nothing
+tenant-specific to leak.
+
+**Traces** (OTLP → Jaeger) answer *where did this turn's time go*. A turn is one trace:
+`agent.turn → agent.retrieve → agent.generate → agent.tools → agent.generate`, with the provider
+call and every tool as children, plus SQLAlchemy statement spans underneath. Spans carry exactly the
+detail metrics may not — tenant id, agent slug, conversation id, the real MCP tool name — because a
+span is sampled and expires. What they never carry is prompt text, retrieved passages, or answers:
+spans leave the process, and one that quoted the prompt would export a tenant's documents to a
+third-party backend on every request.
+
+**Logs** (structured JSON) answer *what exactly happened*. Every line carries the request id, and
+when tracing is on, the trace and span ids — so a p99 spike leads to a trace and a trace leads to its
+own log lines.
+
+The stack runs locally behind a compose profile:
+
+```bash
+docker compose --profile observability up -d
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 uv run uvicorn app.main:app --reload
+```
+
+Grafana at `:3000` (anonymous, with the platform dashboard provisioned), Prometheus at `:9090`,
+Jaeger at `:16686`.
+
+One panel on that dashboard exists to settle an argument rather than to raise an alert. Retrieval
+still has no relevance-score floor, because the right cosine threshold depends on the embedding model
+and a badly-chosen one silently breaks retrieval — so the decision was deferred until it could be
+measured. `eaap_retrieval_top_score` is the measurement: the distribution of best-match scores across
+real traffic, bucketed densely exactly where a floor would plausibly sit.
 
 ## Requirements
 
@@ -284,6 +332,7 @@ Tenant-scoped routes authenticate with `Authorization: Bearer <api-key>`; admin 
 |---|---|---|---|
 | GET | `/health` | — | Liveness — process is up; checks no dependencies |
 | GET | `/health/ready` | — | Readiness — verifies database connectivity |
+| GET | `/metrics` | — | Prometheus scrape (operator surface; off the OpenAPI schema) |
 | POST | `/tenants` | admin | Provision a tenant |
 | POST | `/tenants/{id}/keys` | admin | Mint an API key (plaintext returned once) |
 | GET | `/tenants/me` | tenant | Resolve the calling tenant from its key |
@@ -394,6 +443,27 @@ Request/response contracts: `app/models/schemas.py`.
 - **Streaming is an argument, not a second code path.** The same `complete()` call streams or does
   not; retries, tool-call extraction, usage accounting, and error mapping are shared. A parallel
   implementation is the one that quietly stops counting tokens.
+- **A metric label may only take values the platform chose.** Tenant ids, agent ids, conversation
+  ids, and MCP tool names are all typed in by somebody else; each distinct value would be a time
+  series that outlives whoever created it, so a single tenant could degrade monitoring for everyone.
+  Route templates, providers, models, and domain-error classes are bounded by the code, and those are
+  the only things labelled on.
+- **The cardinality rule and the exposure rule are the same rule.** Because no metric names a tenant,
+  the scrape body describes the platform's health and nothing about who is using it — which is what
+  lets `/metrics` stay unauthenticated, rather than needing credentials Prometheus is awkward at
+  carrying.
+- **Spans carry what metrics may not, and never carry prompts.** Tenant, agent, conversation, and the
+  real remote tool name belong on spans, which are sampled and expire. Prompt text, retrieved
+  passages, and answers belong on neither: a span leaves the process, so one quoting the prompt would
+  ship a tenant's documents to a third-party backend on every request.
+- **A streaming response is timed at its last byte.** A middleware that measures when the handler
+  returns records the SSE chat endpoint — the slowest thing the platform does — as taking roughly
+  zero milliseconds, because the body runs after the response object is returned. The request
+  middleware is raw ASGI for this reason.
+- **Tracing is off until an operator names a collector.** The OpenTelemetry API is safe to call with
+  no SDK configured, so instrumentation lives unconditionally in the hot paths and costs nothing when
+  there is nowhere to send it. An observability stack is an operational dependency, and the platform
+  must not require one to boot — the same discipline the checkpointer follows.
 - **Liveness checks nothing; readiness checks Postgres.** A liveness probe wired to the database
   turns a brief blip into a rolling restart of every replica.
 - **Neither `app/agents` nor `app/services` imports from `app/api`.** They raise domain errors and

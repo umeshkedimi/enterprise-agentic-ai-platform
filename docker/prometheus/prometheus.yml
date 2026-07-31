@@ -1,0 +1,23 @@
+# Scrape config for the local stack.
+#
+# Fifteen seconds because the numbers this platform exports change on the scale
+# of an agent turn, not a web request: a five-second interval would triple the
+# samples without resolving anything a p95 over a minute does not already show.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: eaap
+    metrics_path: /metrics
+    static_configs:
+      # `host.docker.internal` so this works against the app running on the host
+      # under `uv run uvicorn`, which is how it is actually developed. Change to
+      # `app:8000` when the app is running in compose as well.
+      - targets: ["host.docker.internal:8000"]
+        labels:
+          service: enterprise-agentic-ai-platform
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

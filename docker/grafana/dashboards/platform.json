@@ -1,0 +1,218 @@
+{
+  "title": "Agent Platform",
+  "uid": "eaap-platform",
+  "tags": ["eaap"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Turns",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Turn rate by outcome",
+      "description": "A turn is the unit a user waited for. Not the same as a request (one request can fail before the graph starts) and not the same as a model call (one turn can make three).",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum by (outcome) (rate(eaap_agent_turns_total[5m]))",
+          "legendFormat": "{{outcome}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Turn latency",
+      "description": "p50/p95/p99 across the whole turn: retrieval, every model call, every tool.",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(eaap_agent_turn_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(eaap_agent_turn_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(eaap_agent_turn_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Turn failures by domain error",
+      "description": "Whose problem it is. ProviderNotConfiguredError is the operator's, ModelConfigurationError is a tenant's, RetrievalError is neither's until you look.",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 1 },
+      "targets": [
+        {
+          "expr": "sum by (error) (rate(eaap_agent_turn_errors_total[5m]))",
+          "legendFormat": "{{error}}"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Model",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Tokens per second by model",
+      "description": "Prompt and completion split, because they price differently and move for different reasons: prompt grows when retrieval or history grows, completion when answers get longer.",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 10 },
+      "targets": [
+        {
+          "expr": "sum by (model, kind) (rate(eaap_llm_tokens_total[5m]))",
+          "legendFormat": "{{model}} {{kind}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Provider latency p95",
+      "description": "Time waiting on the provider for one call. The gap between this and turn latency is retrieval plus tools.",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 10 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, provider, model) (rate(eaap_llm_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{provider}} {{model}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Model calls per turn",
+      "description": "Above one means the tool loop is running. A drift upward is a prompt or a toolset making the model work harder for the same answer.",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 10 },
+      "targets": [
+        {
+          "expr": "sum(rate(eaap_llm_requests_total[5m])) / sum(rate(eaap_agent_turns_total[5m]))",
+          "legendFormat": "calls / turn"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Retrieval",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 }
+    },
+    {
+      "type": "heatmap",
+      "title": "Best-match score distribution",
+      "description": "The panel this chunk exists for. Retrieval has no relevance floor because the right cosine threshold is embedding-model dependent and a bad one silently breaks retrieval — so the decision was deferred until it could be measured. This is the measurement: where real best matches actually land.",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 19 },
+      "options": { "calculate": false },
+      "targets": [
+        {
+          "expr": "sum by (le) (increase(eaap_retrieval_top_score_bucket[5m]))",
+          "format": "heatmap",
+          "legendFormat": "{{le}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Searches that found nothing",
+      "description": "A search returning zero chunks means the agent answered ungrounded, or refused to. Sustained non-zero is an empty collection or a broken ingest.",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 19 },
+      "targets": [
+        {
+          "expr": "sum(rate(eaap_retrieval_chunks_bucket{le=\"0.0\"}[5m])) / sum(rate(eaap_retrieval_chunks_count[5m]))",
+          "legendFormat": "empty fraction"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Tools and integrations",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 28 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Tool calls by outcome",
+      "description": "`unknown`/`denied` is the allowlist refusing a call the model invented or an injection suggested. Non-zero is worth reading the logs over — the name is there, not here.",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 29 },
+      "targets": [
+        {
+          "expr": "sum by (tool, outcome) (rate(eaap_tool_calls_total[5m]))",
+          "legendFormat": "{{tool}} {{outcome}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "MCP discovery cache hit ratio",
+      "description": "Discovery is a round trip per server per model call. If this is not near one, the TTL is too short or servers are being edited constantly — and the deferred connection pool starts to look worth building.",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 29 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1, "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum(rate(eaap_mcp_discovery_total{outcome=\"cache_hit\"}[5m])) / sum(rate(eaap_mcp_discovery_total[5m]))",
+          "legendFormat": "hit ratio"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "MCP discovery failures",
+      "description": "`blocked` is the platform refusing to dial a URL that resolves somewhere private. `error` is a tenant's server the platform tried to reach and could not.",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 29 },
+      "targets": [
+        {
+          "expr": "sum by (outcome) (rate(eaap_mcp_discovery_total{outcome=~\"error|blocked\"}[5m]))",
+          "legendFormat": "{{outcome}}"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "HTTP",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 37 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Requests by route",
+      "description": "Route templates, never paths. One series per endpoint, not one per agent.",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 38 },
+      "targets": [
+        {
+          "expr": "sum by (route) (rate(eaap_http_requests_total[5m]))",
+          "legendFormat": "{{route}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "5xx rate",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 38 },
+      "targets": [
+        {
+          "expr": "sum by (route) (rate(eaap_http_requests_total{status=~\"5..\"}[5m]))",
+          "legendFormat": "{{route}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Open streams",
+      "description": "Responses still being written — in practice, live SSE conversations. Watch this before draining a pod: every one of them is somebody mid-answer.",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 38 },
+      "targets": [
+        {
+          "expr": "sum(eaap_http_responses_in_flight)",
+          "legendFormat": "open"
+        }
+      ]
+    }
+  ]
+}

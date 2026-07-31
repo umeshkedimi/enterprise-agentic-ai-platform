@@ -44,5 +44,57 @@ services:
       redis:
         condition: service_healthy
 
+  # --- Observability -------------------------------------------------------
+  #
+  # Behind a profile, so `docker compose up -d postgres redis` — the command
+  # every other workflow in this repo starts with — does not also start three
+  # services nobody asked for. Bring the stack up with:
+  #
+  #     docker compose --profile observability up -d
+  #
+  # There is deliberately no OpenTelemetry Collector here. In production a
+  # collector is the right answer — it buffers, re-routes, and lets the app stay
+  # ignorant of where telemetry ends up — but locally it is a hop between a
+  # process and a backend that is already listening on the same protocol, and a
+  # config file whose only job is to forward.
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    profiles: ["observability"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  # Jaeger takes OTLP directly and ships its own UI, so the traces this platform
+  # emits are viewable without a collector, a storage backend, or a query
+  # service in between.
+  jaeger:
+    image: jaegertracing/all-in-one:1.65.0
+    profiles: ["observability"]
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"  # UI
+      - "4318:4318"    # OTLP/HTTP — what OTEL_EXPORTER_OTLP_ENDPOINT points at
+
+  grafana:
+    image: grafana/grafana:11.5.0
+    profiles: ["observability"]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
 volumes:
   postgres_data:
