@@ -66,6 +66,27 @@ class CredentialStorageUnavailableError(DomainError):
     """
 
 
+class EvaluationNotApplicableError(DomainError):
+    """This turn cannot be judged for groundedness (→ 409).
+
+    A user turn has no claims to check, and an agent with no knowledge scope was
+    never grounded in documents to begin with — its answer may be perfectly good
+    and this rubric still has nothing to say about it. Refused rather than scored
+    zero: a fabricated failing score in the audit trail is worse than a gap,
+    because someone will chart it.
+    """
+
+
+class EvaluationFailedError(DomainError):
+    """The judge ran but its verdict could not be read (→ 502).
+
+    Kept apart from `ModelInvocationError` because the provider did its job. What
+    failed is the platform's contract with the judge — a response that is not the
+    documented JSON — and the fix is a prompt or a model, not a retry against a
+    sick upstream.
+    """
+
+
 class RetrievalError(DomainError):
     """Evidence could not be gathered for a grounded answer (→ 502).
 

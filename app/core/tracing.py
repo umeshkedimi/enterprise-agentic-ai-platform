@@ -71,6 +71,15 @@ RETRIEVAL_TOP_SCORE = "eaap.retrieval.top_score"
 TOOL_STEPS = "eaap.tool_steps"
 STREAMED = "eaap.streamed"
 
+# Evaluation. The verdict and score are on the span as well as in the row
+# because the interesting question about a bad score is usually "what did that
+# turn *do*", and a span is the only signal that can answer it — the judgement
+# hangs in the same trace as the retrieval and the model call it is judging.
+EVALUATION_VERDICT = "eaap.evaluation.verdict"
+EVALUATION_SCORE = "eaap.evaluation.score"
+EVALUATION_CITATIONS = "eaap.evaluation.citations"
+EVALUATION_EVIDENCE_COMPLETE = "eaap.evaluation.evidence_complete"
+
 
 def configure_tracing(settings: Settings) -> None:
     """Install a tracer provider, if an operator has named somewhere to send spans.

@@ -91,6 +91,30 @@ class Settings(BaseSettings):
 
     agent_max_retries: int = 2
 
+    # --- Evaluation ---
+    # The judge is platform config, never per-agent: a groundedness score is only
+    # comparable across agents if every agent was measured by the same judge, and
+    # letting a tenant choose its own would let it choose a lenient one.
+    #
+    # Defaults to the platform's default chat model rather than something cheap.
+    # A weak judge does not produce slightly worse scores, it produces noise, and
+    # a noisy audit trail is worse than none because people act on it.
+    #
+    # Spelled out rather than imported from `app/models/agent.py`: settings are
+    # loaded before anything else, and reaching up into the model layer from here
+    # would make importing configuration register SQLModel tables as a side
+    # effect. The two defaults agreeing is a coincidence worth keeping, not a
+    # constraint worth a layering violation.
+    evaluation_judge_model: str = "claude-sonnet-5"
+    # Room for a claim-by-claim breakdown of a long answer. A judgement truncated
+    # mid-JSON is unparseable, which costs the whole evaluation.
+    evaluation_judge_max_output_tokens: int = 2048
+    # How many claims one answer may be broken into before the platform stops
+    # reading them. A bound on what a judge can write into a row, not a rubric
+    # rule — the judge is told nothing about it.
+    evaluation_max_claims: int = 50
+    evaluation_rationale_max_chars: int = 2000
+
 
 @lru_cache
 def get_settings() -> Settings:
