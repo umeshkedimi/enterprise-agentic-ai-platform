@@ -71,20 +71,20 @@
       "gridPos": { "h": 8, "w": 8, "x": 0, "y": 10 },
       "targets": [
         {
-          "expr": "sum by (model, kind) (rate(eaap_llm_tokens_total[5m]))",
-          "legendFormat": "{{model}} {{kind}}"
+          "expr": "sum by (model, workload, kind) (rate(eaap_llm_tokens_total[5m]))",
+          "legendFormat": "{{model}} {{workload}} {{kind}}"
         }
       ]
     },
     {
       "type": "timeseries",
       "title": "Provider latency p95",
-      "description": "Time waiting on the provider for one call. The gap between this and turn latency is retrieval plus tools.",
+      "description": "Time waiting on the provider for one call, for served turns only. The evaluation judge is excluded deliberately: its calls are long, cheap, and nobody is waiting on them, so including them would move this number without a single answer getting slower. The gap between this and turn latency is retrieval plus tools.",
       "gridPos": { "h": 8, "w": 8, "x": 8, "y": 10 },
       "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le, provider, model) (rate(eaap_llm_request_duration_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, provider, model) (rate(eaap_llm_request_duration_seconds_bucket{workload=\"serving\"}[5m])))",
           "legendFormat": "{{provider}} {{model}}"
         }
       ]
@@ -96,7 +96,7 @@
       "gridPos": { "h": 8, "w": 8, "x": 16, "y": 10 },
       "targets": [
         {
-          "expr": "sum(rate(eaap_llm_requests_total[5m])) / sum(rate(eaap_agent_turns_total[5m]))",
+          "expr": "sum(rate(eaap_llm_requests_total{workload=\"serving\"}[5m])) / sum(rate(eaap_agent_turns_total[5m]))",
           "legendFormat": "calls / turn"
         }
       ]
@@ -134,14 +134,57 @@
     },
     {
       "type": "row",
-      "title": "Tools and integrations",
+      "title": "Evaluation",
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 28 }
+    },
+    {
+      "type": "heatmap",
+      "title": "Groundedness score distribution",
+      "description": "The fraction of an answer's claims the sources actually supported, per judged turn. Abstentions are absent rather than counted as perfect — an answer that asserts nothing has no groundedness, and folding it in would let a retriever that finds nothing report a flawless platform.",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 29 },
+      "options": { "calculate": false },
+      "targets": [
+        {
+          "expr": "sum by (le) (increase(eaap_evaluation_score_bucket[30m]))",
+          "format": "heatmap",
+          "legendFormat": "{{le}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Verdicts",
+      "description": "`abstained` is the agent correctly declining for lack of evidence and is not a failure — a rise in it alongside a fall in `supported` usually means ingestion, not the model. `unsupported` is the one to page on.",
+      "gridPos": { "h": 9, "w": 6, "x": 12, "y": 29 },
+      "targets": [
+        {
+          "expr": "sum by (verdict) (rate(eaap_evaluations_total[30m]))",
+          "legendFormat": "{{verdict}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Judgements not recorded",
+      "description": "`unreadable` is a judge whose reply was not the documented JSON; the platform refuses to invent a score, so these turns simply have none. Sustained non-zero means the judge model needs changing.",
+      "gridPos": { "h": 9, "w": 6, "x": 18, "y": 29 },
+      "targets": [
+        {
+          "expr": "sum by (reason) (rate(eaap_evaluation_failures_total[30m]))",
+          "legendFormat": "{{reason}}"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Tools and integrations",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 38 }
     },
     {
       "type": "timeseries",
       "title": "Tool calls by outcome",
       "description": "`unknown`/`denied` is the allowlist refusing a call the model invented or an injection suggested. Non-zero is worth reading the logs over — the name is there, not here.",
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 29 },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 39 },
       "targets": [
         {
           "expr": "sum by (tool, outcome) (rate(eaap_tool_calls_total[5m]))",
@@ -153,7 +196,7 @@
       "type": "timeseries",
       "title": "MCP discovery cache hit ratio",
       "description": "Discovery is a round trip per server per model call. If this is not near one, the TTL is too short or servers are being edited constantly — and the deferred connection pool starts to look worth building.",
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 29 },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 39 },
       "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1, "min": 0 }, "overrides": [] },
       "targets": [
         {
@@ -166,7 +209,7 @@
       "type": "timeseries",
       "title": "MCP discovery failures",
       "description": "`blocked` is the platform refusing to dial a URL that resolves somewhere private. `error` is a tenant's server the platform tried to reach and could not.",
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 29 },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 39 },
       "targets": [
         {
           "expr": "sum by (outcome) (rate(eaap_mcp_discovery_total{outcome=~\"error|blocked\"}[5m]))",
@@ -177,13 +220,13 @@
     {
       "type": "row",
       "title": "HTTP",
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 37 }
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 47 }
     },
     {
       "type": "timeseries",
       "title": "Requests by route",
       "description": "Route templates, never paths. One series per endpoint, not one per agent.",
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 38 },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 48 },
       "targets": [
         {
           "expr": "sum by (route) (rate(eaap_http_requests_total[5m]))",
@@ -194,7 +237,7 @@
     {
       "type": "timeseries",
       "title": "5xx rate",
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 38 },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 48 },
       "targets": [
         {
           "expr": "sum by (route) (rate(eaap_http_requests_total{status=~\"5..\"}[5m]))",
@@ -206,7 +249,7 @@
       "type": "timeseries",
       "title": "Open streams",
       "description": "Responses still being written — in practice, live SSE conversations. Watch this before draining a pod: every one of them is somebody mid-answer.",
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 38 },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 48 },
       "targets": [
         {
           "expr": "sum(eaap_http_responses_in_flight)",

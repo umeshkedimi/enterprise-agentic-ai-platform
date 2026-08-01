@@ -71,6 +71,17 @@ explicitly marked as not-yet-built.
   sampled and expire. Every log line carries the request id and, when tracing is on, the trace and
   span ids, so a slow turn in a dashboard leads to a trace and a trace leads to its logs. Tracing is
   off until an operator names a collector; the platform runs without one.
+- Evaluation & audit trail — served answers are judged for groundedness against the evidence they
+  were actually shown. The judge is never asked for a score: it enumerates the claims in an answer
+  and marks each supported or not, and the platform does the arithmetic, so every number is
+  reproducible from the stored breakdown and a team owner who disagrees with a 0.67 can see which
+  third failed. Evaluation runs after the fact over the transcript, never inside a turn — an
+  assistant whose judge is down still answers, and a scoring bug cannot take answers with it. An
+  answer that correctly declines for lack of evidence is recorded as an abstention with no score,
+  rather than as a perfect one, so a retriever that finds nothing cannot report flawless grounding.
+  A calibration report then buckets retrieval scores against judged groundedness and will propose a
+  relevance floor — including what that floor would cost in abstentions — but declines to propose
+  one at all until there is enough data to mean it.
 - FastAPI application — app factory, lifespan-managed resources, request correlation IDs,
   structured JSON logging, liveness/readiness probes.
 - Postgres + pgvector and Redis via Docker Compose, with Prometheus, Grafana, and Jaeger behind an
@@ -78,8 +89,8 @@ explicitly marked as not-yet-built.
 
 **Roadmap (not yet implemented)**
 
-Federated auth (OIDC/SSO) · async ingestion via Celery/RabbitMQ · evaluation (groundedness,
-confidence calibration, audit trail) · Kubernetes manifests · CI/CD.
+Federated auth (OIDC/SSO) · async ingestion via Celery/RabbitMQ · queued/scheduled evaluation runs
+(the harness is synchronous today) · Kubernetes manifests · CI/CD.
 
 ## Architecture
 
@@ -88,7 +99,7 @@ confidence calibration, audit trail) · Kubernetes manifests · CI/CD.
 | API | `app/api` | FastAPI routers, request/response DTOs, HTTP error mapping |
 | Agents | `app/agents` | The LangGraph workflow — state/context split, nodes, grounding prompts, checkpointer |
 | Tools | `app/tools` | Tool registry, per-agent capability resolution, built-in tools, MCP client |
-| Services | `app/services` | Tenancy, agent/collection config, ingestion, retrieval, conversations, completions — framework-agnostic |
+| Services | `app/services` | Tenancy, agent/collection config, ingestion, retrieval, conversations, completions, evaluation — framework-agnostic |
 | Models | `app/models` | SQLModel tables (persistence) + Pydantic DTOs (transport) |
 | Core | `app/core` | Settings, structured logging, middleware, metrics, tracing, model routing, credential encryption, outbound-URL safety |
 | DB | `app/db` | Engine, session factory, Alembic metadata target |
@@ -149,6 +160,50 @@ still has no relevance-score floor, because the right cosine threshold depends o
 and a badly-chosen one silently breaks retrieval — so the decision was deferred until it could be
 measured. `eaap_retrieval_top_score` is the measurement: the distribution of best-match scores across
 real traffic, bucketed densely exactly where a floor would plausibly sit.
+
+### Evaluation
+
+Answers are audited after the fact, over the transcript, never inside the turn that produced them.
+A judge on the request path would roughly double the cost and latency of every answer, but the
+reason it is not there is stronger than that: the two have to be able to fail independently. An
+assistant whose evaluator is down still answers, and a scoring bug cannot take answers with it.
+
+**The judge is never asked for a score.** A model asked to rate an answer out of ten returns a
+number with no defensible relationship to anything, and asked whether an answer is good it returns
+"yes". So it is asked the concrete question models are reliable on — does this sentence follow from
+that paragraph — once per claim, and the platform divides. The consequences are worth the detour:
+every score is reproducible from the stored claims, a reader who disagrees with a 0.67 can see which
+third failed, and a small, cheap model becomes a defensible judge, which is what makes judging every
+turn affordable at all.
+
+**Evidence is re-read, not quoted from the citation.** A citation snippet is a 240-character prefix
+of a chunk running to roughly 400 tokens, so a judge fed snippets would fail supported claims for
+lack of evidence the answering model actually had. Full chunk text is recovered by `chunk_id`;
+citations whose document has since been deleted fall back to the frozen snippet, which is the job
+that snippet was stored for.
+
+**An abstention is not a failure.** An agent shown nothing relevant that says so has done exactly
+what a grounded assistant should, and it is recorded with a null score rather than a zero or a one.
+A stand-in 1.0 would let a retriever that finds nothing report a flawless platform; a 0.0 would
+train the platform's own metrics to punish the behaviour they exist to encourage.
+
+```bash
+# Judge one turn, or a whole thread. Repeating either is free — an evaluation
+# already on file is returned rather than paid for again.
+curl -X POST .../agents/$AGENT/conversations/$CONV/messages/$MSG/evaluations -H "$AUTH"
+curl -X POST .../agents/$AGENT/conversations/$CONV/evaluations -H "$AUTH"
+
+# What a retrieval score turned out to be worth.
+curl .../evaluations/calibration -H "$AUTH"
+```
+
+That last endpoint is the other half of the deferred floor decision. Every evaluation row holds the
+platform's own confidence in the best passage it retrieved next to an independent judgement of the
+answer built on it; bucketed against each other, they answer *given that the best match scored 0.62,
+how often was the answer grounded?* It will propose a floor — and report how many turns would have
+become abstentions under it, which is the number a threshold read off a chart never comes with — but
+it refuses to propose one from thin data, since a guess dressed as an analysis is worse than the
+honest deferral it replaced.
 
 ## Requirements
 
@@ -352,6 +407,11 @@ Tenant-scoped routes authenticate with `Authorization: Bearer <api-key>`; admin 
 | GET | `/mcp-servers` | tenant | List the tenant's MCP servers |
 | GET | `/mcp-servers/{id}/tools` | tenant | Discover its tools, under the names an allowlist uses |
 | GET/PATCH/DELETE | `/mcp-servers/{id}` | tenant | Fetch, update, or remove a server |
+| POST | `/agents/{id}/conversations/{cid}/messages/{mid}/evaluations` | tenant | Judge one turn for groundedness (idempotent; `refresh` re-judges) |
+| GET | `/agents/{id}/conversations/{cid}/messages/{mid}/evaluations` | tenant | Judgements on file for a turn, with the claim-by-claim breakdown |
+| POST | `/agents/{id}/conversations/{cid}/evaluations` | tenant | Judge every assistant turn in a thread |
+| GET | `/agents/{id}/calibration` | tenant | What this agent's retrieval scores were worth |
+| GET | `/evaluations/calibration` | tenant | The same reading across the tenant, with a floor recommendation |
 | POST | `/collections/{id}/documents` | tenant | Upload a pdf/txt/markdown document |
 | GET | `/collections/{id}/documents` | tenant | List documents with chunk counts |
 | DELETE | `/documents/{id}` | tenant | Delete a document and its chunks |
@@ -464,6 +524,29 @@ Request/response contracts: `app/models/schemas.py`.
   no SDK configured, so instrumentation lives unconditionally in the hot paths and costs nothing when
   there is nowhere to send it. An observability stack is an operational dependency, and the platform
   must not require one to boot — the same discipline the checkpointer follows.
+- **Evaluation is downstream of serving and can fail on its own.** The judge reads the transcript
+  after the fact and nothing on the request path waits for it, so an evaluator outage costs the
+  platform its scores and never its answers. It is also why the transcript is the product record and
+  the checkpointer is not: judging happens later, twice, or under a better rubric.
+- **The judge counts claims; the platform does the arithmetic.** Models are unreliable at producing
+  calibrated scores and reliable at deciding whether a sentence follows from a paragraph, so the
+  rubric only ever asks the second question. Every score is recomputable from the stored claims, and
+  a cheap model becomes a defensible judge — which is what makes judging every turn affordable.
+- **The judge model is platform config, never per-agent.** A groundedness score is only comparable
+  across agents if the same judge produced it, and a tenant allowed to choose its own would choose a
+  lenient one.
+- **An unreadable verdict raises rather than defaults.** A fabricated score in an audit trail is
+  worse than a missing one, because somebody will chart it and act on it.
+- **An abstention has no groundedness.** It is stored as a null score and counted by verdict, not
+  folded into the average as a 1.0 — which would let a retriever that finds nothing report a
+  flawless platform.
+- **Serving and evaluation are separate workloads on the metrics.** The judge deliberately shares
+  `complete()` so it cannot become a workload nobody counts, which leaves latency the one thing that
+  must be told apart: its long, unhurried calls would otherwise move the p95 an operator pages on
+  without a single answer getting slower.
+- **A calibration report declines to recommend a floor from thin data.** The relevance-floor decision
+  was deferred precisely to stop it being a guess, and an analysis confident on the strength of nine
+  samples is the same guess wearing a chart.
 - **Liveness checks nothing; readiness checks Postgres.** A liveness probe wired to the database
   turns a brief blip into a rolling restart of every replica.
 - **Neither `app/agents` nor `app/services` imports from `app/api`.** They raise domain errors and

@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import litellm
 import pytest
 
+from app.core import metrics
 from tests.integration.conftest import create_agent, create_collection, upload_document
 
 HANDBOOK = (
@@ -425,6 +426,81 @@ async def test_calibration_reports_the_bands_without_recommending_from_thin_data
     assert sum(b["evaluations"] for b in body["buckets"]) == 1
     assert body["recommendation"]["floor"] is None
     assert "at least" in body["recommendation"]["rationale"]
+
+
+async def test_the_judges_tokens_are_counted_apart_from_served_turns(
+    authed_client, fake_embeddings, provider_creds, scripted_provider
+):
+    """Otherwise running the audit harness reads as a serving-latency regression.
+
+    The judge deliberately goes through the same `complete()` as the serving
+    path, so that it cannot become a workload nobody is counting. `workload` is
+    what keeps that decision from costing an operator the metric they page on.
+    """
+    client, _ = authed_client
+    agent_id, conversation_id, message_id = await served_turn(client, scripted_provider)
+
+    def tokens(workload: str) -> float:
+        return (
+            metrics.REGISTRY.get_sample_value(
+                "eaap_llm_tokens_total",
+                {
+                    "provider": "openai",
+                    "model": "gpt-4o-mini",
+                    "workload": workload,
+                    "kind": "prompt",
+                },
+            )
+            or 0.0
+        )
+
+    before_serving, before_evaluation = tokens("serving"), tokens("evaluation")
+
+    scripted_provider.queue.append(
+        judge_reply({"claims": [{"claim": "a", "supported": True}], "notes": ""})
+    )
+    await client.post(evaluation_url(agent_id, conversation_id, message_id))
+
+    # The judge's 400 prompt tokens landed on the evaluation series...
+    assert tokens("evaluation") - before_evaluation == 400
+    # ...and none of them on the one that describes answering a user.
+    assert tokens("serving") == before_serving
+
+
+async def test_a_verdict_is_counted_and_an_abstention_leaves_the_score_alone(
+    authed_client, fake_embeddings, provider_creds, scripted_provider
+):
+    """An answer that asserts nothing must not report as perfectly grounded."""
+    client, _ = authed_client
+    agent_id, conversation_id, message_id = await served_turn(
+        client, scripted_provider, answer="The available documents do not cover this."
+    )
+
+    def score_count() -> float:
+        return (
+            metrics.REGISTRY.get_sample_value(
+                "eaap_evaluation_score_count", {"evaluator": "groundedness"}
+            )
+            or 0.0
+        )
+
+    def verdicts(verdict: str) -> float:
+        return (
+            metrics.REGISTRY.get_sample_value(
+                "eaap_evaluations_total",
+                {"evaluator": "groundedness", "verdict": verdict},
+            )
+            or 0.0
+        )
+
+    before_scores, before_abstentions = score_count(), verdicts("abstained")
+
+    scripted_provider.queue.append(judge_reply({"claims": [], "notes": ""}))
+    await client.post(evaluation_url(agent_id, conversation_id, message_id))
+
+    assert verdicts("abstained") - before_abstentions == 1
+    # Absent from the score histogram entirely, rather than recorded as 1.0.
+    assert score_count() == before_scores
 
 
 async def test_tenant_calibration_sees_the_same_row_as_agent_calibration(

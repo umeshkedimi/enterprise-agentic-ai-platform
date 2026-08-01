@@ -55,8 +55,15 @@ FORBIDDEN_LABEL_FRAGMENTS = (
 # `tool` is the one label named after something a tenant can influence, and it
 # is safe only because `tool_label` collapses every remote name to a constant.
 # The test below pins that; this exempts the name from the blanket scan.
+#
+# Every other entry takes values written down in this repository. `workload`,
+# `verdict`, `evaluator`, and `reason` are module constants, chosen by the
+# platform and never composed from a provider message or a model's output —
+# which is the whole test: a label is a promise that somebody can still chart it
+# in a year, and that needs the value set to be finite and decided here.
 ALLOWED_LABELS = {"method", "route", "status", "outcome", "streamed", "error",
-                  "provider", "model", "kind", "tool"}
+                  "provider", "model", "kind", "tool", "workload", "verdict",
+                  "evaluator", "reason"}
 
 
 def _declared_metrics():

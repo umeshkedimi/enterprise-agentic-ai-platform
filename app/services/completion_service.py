@@ -157,6 +157,7 @@ async def _invoke(params: dict[str, Any], on_delta: DeltaHandler | None) -> Any:
 
 def _record_call(
     route: ModelRoute,
+    workload: str,
     streamed: str,
     outcome: str,
     elapsed: float,
@@ -168,16 +169,20 @@ def _record_call(
     several calls and pays for all of them, so metrics taken once per turn would
     understate exactly the turns that cost the most.
 
-    The labels are `provider` and `model` and nothing else. Both are values
-    LiteLLM's model map has already vouched for — an unroutable model raises
-    before it reaches here, so a tenant cannot mint a time series by typing a
-    model name into their agent config.
+    The labels are `provider`, `model`, and `workload` and nothing else. The
+    first two are values LiteLLM's model map has already vouched for — an
+    unroutable model raises before it reaches here, so a tenant cannot mint a
+    time series by typing a model name into their agent config. The third is one
+    of two platform constants, and it is here because the evaluation judge calls
+    this same function: without it, running the audit harness would push the p95
+    an operator pages on without a single served turn getting slower.
     """
-    metrics.LLM_REQUESTS.labels(route.provider, route.model, outcome).inc()
-    metrics.LLM_DURATION.labels(route.provider, route.model, streamed).observe(elapsed)
+    provider, model = route.provider, route.model
+    metrics.LLM_REQUESTS.labels(provider, model, workload, outcome).inc()
+    metrics.LLM_DURATION.labels(provider, model, workload, streamed).observe(elapsed)
     if usage is not None:
-        metrics.LLM_TOKENS.labels(route.provider, route.model, "prompt").inc(usage.prompt_tokens)
-        metrics.LLM_TOKENS.labels(route.provider, route.model, "completion").inc(
+        metrics.LLM_TOKENS.labels(provider, model, workload, "prompt").inc(usage.prompt_tokens)
+        metrics.LLM_TOKENS.labels(provider, model, workload, "completion").inc(
             usage.completion_tokens
         )
 
@@ -190,6 +195,7 @@ async def complete(
     tools: Sequence[dict[str, Any]] = (),
     scratchpad: Sequence[dict[str, Any]] = (),
     on_delta: DeltaHandler | None = None,
+    workload: str = metrics.WORKLOAD_SERVING,
     settings: Settings | None = None,
 ) -> Completion:
     """Invoke `agent`'s model with its configured prompt and execution policy.
@@ -210,6 +216,12 @@ async def complete(
     each text fragment as it arrives. The return value is unchanged either way —
     a caller that wants tokens early still gets the whole completion at the end,
     so nothing downstream has to know how the answer was fetched.
+
+    `workload` separates serving from evaluation on the metrics only. It changes
+    nothing about the request, and it exists because the evaluation judge comes
+    through this same function deliberately — a second route to a provider is how
+    a platform acquires a workload it is not counting — which leaves latency the
+    one thing that does have to be told apart.
     """
     settings = settings or get_settings()
 
@@ -293,7 +305,7 @@ async def complete(
         try:
             response = await _invoke(params, on_delta)
         except ModelInvocationError:
-            _record_call(route, streamed_label, "error", time.perf_counter() - started)
+            _record_call(route, workload, streamed_label, "error", time.perf_counter() - started)
             raise
         except Exception as exc:  # noqa: BLE001 - LiteLLM surfaces provider-specific types
             logger.warning(
@@ -303,7 +315,7 @@ async def complete(
                 provider=route.provider,
                 error=type(exc).__name__,
             )
-            _record_call(route, streamed_label, "error", time.perf_counter() - started)
+            _record_call(route, workload, streamed_label, "error", time.perf_counter() - started)
             raise ModelInvocationError(str(exc)) from exc
         elapsed = time.perf_counter() - started
         latency_ms = int(elapsed * 1000)
@@ -315,7 +327,7 @@ async def complete(
         tool_calls = _extract_tool_calls(message)
         usage = _extract_usage(response)
 
-        _record_call(route, streamed_label, "ok", elapsed, usage)
+        _record_call(route, workload, streamed_label, "ok", elapsed, usage)
         tracing.set_attributes(
             current,
             **{

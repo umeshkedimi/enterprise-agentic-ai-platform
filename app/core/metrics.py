@@ -124,14 +124,14 @@ AGENT_TURN_ERRORS = Counter(
 LLM_REQUESTS = Counter(
     "eaap_llm_requests_total",
     "Provider calls, by outcome. One turn can make several.",
-    ["provider", "model", "outcome"],
+    ["provider", "model", "workload", "outcome"],
     registry=REGISTRY,
 )
 
 LLM_DURATION = Histogram(
     "eaap_llm_request_duration_seconds",
     "Time spent waiting on the provider for one call.",
-    ["provider", "model", "streamed"],
+    ["provider", "model", "workload", "streamed"],
     buckets=_TURN_BUCKETS,
     registry=REGISTRY,
 )
@@ -143,9 +143,18 @@ LLM_DURATION = Histogram(
 LLM_TOKENS = Counter(
     "eaap_llm_tokens_total",
     "Tokens billed, by direction.",
-    ["provider", "model", "kind"],
+    ["provider", "model", "workload", "kind"],
     registry=REGISTRY,
 )
+
+# The two things the platform calls a model for. Both are platform constants —
+# nobody outside chooses between them — and separating them is not bookkeeping:
+# the evaluation judge issues long, cheap, unhurried calls that nobody is waiting
+# on, and folding them into the same series as the serving path would move the
+# p95 an operator pages on without a single served turn getting slower. Enabling
+# evaluation would look like a latency regression.
+WORKLOAD_SERVING = "serving"
+WORKLOAD_EVALUATION = "evaluation"
 
 # --- Retrieval --------------------------------------------------------------
 
@@ -229,6 +238,51 @@ MCP_DISCOVERY_DURATION = Histogram(
     "eaap_mcp_discovery_duration_seconds",
     "Time to list one server's tools, excluding cache hits.",
     buckets=(0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 30),
+    registry=REGISTRY,
+)
+
+
+# --- Evaluation -------------------------------------------------------------
+#
+# `verdict` and `reason` are safe labels for the same reason `outcome` is: every
+# value either one can take is written in this repository. A verdict is one of
+# four the platform defined and the judge chooses between; it is never a string
+# the judge composed. The score itself is a histogram rather than a gauge because
+# the interesting question is the shape of the distribution — a mean groundedness
+# of 0.8 is a very different platform depending on whether it is every answer
+# scoring 0.8 or four perfect answers and one fabrication.
+EVALUATIONS = Counter(
+    "eaap_evaluations_total",
+    "Turns judged, by verdict.",
+    ["evaluator", "verdict"],
+    registry=REGISTRY,
+)
+
+EVALUATION_FAILURES = Counter(
+    "eaap_evaluation_failures_total",
+    "Judgements that could not be recorded, by reason.",
+    ["evaluator", "reason"],
+    registry=REGISTRY,
+)
+
+EVALUATION_DURATION = Histogram(
+    "eaap_evaluation_duration_seconds",
+    "Time to judge one turn, including the judge's model call.",
+    ["evaluator"],
+    buckets=_TURN_BUCKETS,
+    registry=REGISTRY,
+)
+
+# Abstentions are absent from this histogram, not counted as 1.0. An answer that
+# asserts nothing has no groundedness to measure, and folding it in as perfect
+# would let a retriever that finds nothing report a flawless platform. They are
+# counted by verdict on `eaap_evaluations_total` instead, where a rising
+# abstention rate reads as what it is.
+EVALUATION_SCORE = Histogram(
+    "eaap_evaluation_score",
+    "Fraction of an answer's claims the sources supported, for answers that made any.",
+    ["evaluator"],
+    buckets=(0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0),
     registry=REGISTRY,
 )
 

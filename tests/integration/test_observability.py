@@ -91,7 +91,14 @@ async def test_a_chat_turn_moves_the_numbers_an_operator_watches(
     agent_id = await create_agent(client, slug="hr-bot", collection_id=collection_id)
 
     turn_labels = {"outcome": "ok", "streamed": "false"}
-    token_labels = {"provider": "openai", "model": "gpt-4o-mini", "kind": "prompt"}
+    # `workload` distinguishes a served turn from an evaluation judge's call, so
+    # a serving-latency assertion has to name which one it means.
+    token_labels = {
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "workload": "serving",
+        "kind": "prompt",
+    }
     before = (
         sample("eaap_agent_turns_total", turn_labels),
         sample("eaap_llm_tokens_total", token_labels),

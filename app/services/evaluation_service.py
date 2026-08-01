@@ -26,7 +26,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core import tracing
+from app.core import metrics, tracing
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
 from app.models.agent import Agent
@@ -85,6 +85,16 @@ class _Evidence:
     complete: bool
 
 
+def _count_failure(reason: str) -> None:
+    """One bucket per reason a judgement did not get written.
+
+    The reasons are constants in this module, never a message from a provider or
+    a model — the point of a label is that somebody can chart it a year from now,
+    which needs the set of values to be finite and chosen here.
+    """
+    metrics.EVALUATION_FAILURES.labels(EVALUATOR_GROUNDEDNESS, reason).inc()
+
+
 def _judge_agent(*, tenant_id: uuid.UUID, settings: Settings) -> Agent:
     return Agent(
         id=_JUDGE_AGENT_ID,
@@ -140,6 +150,7 @@ async def _load_target(
 
     message, conversation = row
     if message.role != _ASSISTANT:
+        _count_failure("not_applicable")
         raise EvaluationNotApplicableError("only assistant turns can be judged")
 
     agent = await session.get(Agent, conversation.agent_id)
@@ -149,6 +160,7 @@ async def _load_target(
         # A pure-tool agent answers from tool results, which the platform does
         # not retain — there is no evidence to audit against, and a zero here
         # would be a statement about the rubric, not about the agent.
+        _count_failure("not_applicable")
         raise EvaluationNotApplicableError("agent has no knowledge scope to be grounded in")
 
     return message, conversation, agent
@@ -329,18 +341,27 @@ async def evaluate_message(
             tracing.EVALUATION_EVIDENCE_COMPLETE: evidence.complete,
         },
     ) as current:
-        completion = await complete(
-            agent=_judge_agent(tenant_id=tenant_id, settings=settings),
-            turns=[
-                Turn(
-                    role="user",
-                    content=build_audit_request(
-                        question=question, answer=message.content, sources=evidence.sources
-                    ),
-                )
-            ],
-            settings=settings,
-        )
+        try:
+            completion = await complete(
+                agent=_judge_agent(tenant_id=tenant_id, settings=settings),
+                turns=[
+                    Turn(
+                        role="user",
+                        content=build_audit_request(
+                            question=question, answer=message.content, sources=evidence.sources
+                        ),
+                    )
+                ],
+                # Counted apart from served turns. The judge's calls are long,
+                # cheap, and unhurried, and averaging them into the serving path
+                # would move the latency an operator pages on without a single
+                # answer getting slower.
+                workload=metrics.WORKLOAD_EVALUATION,
+                settings=settings,
+            )
+        except Exception:
+            _count_failure("provider")
+            raise
 
         try:
             payload = parse_audit_response(completion.text)
@@ -351,6 +372,7 @@ async def evaluate_message(
                 judge_model=completion.model,
                 error=str(exc),
             )
+            _count_failure("unreadable")
             raise EvaluationFailedError(str(exc)) from exc
 
         claims = _normalise_claims(payload["claims"], limit=settings.evaluation_max_claims)
@@ -387,6 +409,15 @@ async def evaluate_message(
     session.add(evaluation)
     await session.commit()
     await session.refresh(evaluation)
+
+    metrics.EVALUATIONS.labels(EVALUATOR_GROUNDEDNESS, verdict).inc()
+    metrics.EVALUATION_DURATION.labels(EVALUATOR_GROUNDEDNESS).observe(
+        evaluation.latency_ms / 1000
+    )
+    if score is not None:
+        # Abstentions are deliberately absent rather than recorded as 1.0 — see
+        # the histogram's own comment in `app/core/metrics.py`.
+        metrics.EVALUATION_SCORE.labels(EVALUATOR_GROUNDEDNESS).observe(score)
 
     logger.info(
         "turn_evaluated",
