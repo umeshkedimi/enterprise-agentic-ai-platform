@@ -6,7 +6,16 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.agents.checkpointer import start_checkpointer, stop_checkpointer
-from app.api import agents, collections, documents, health, mcp_servers, metrics, tenants
+from app.api import (
+    agents,
+    collections,
+    documents,
+    evaluations,
+    health,
+    mcp_servers,
+    metrics,
+    tenants,
+)
 from app.core import metrics as metrics_registry
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging, get_logger
@@ -89,6 +98,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(agents.router)
     app.include_router(documents.router)
     app.include_router(mcp_servers.router)
+    app.include_router(evaluations.router)
 
     _register_exception_handlers(app)
 

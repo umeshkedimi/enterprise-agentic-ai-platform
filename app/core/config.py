@@ -96,16 +96,18 @@ class Settings(BaseSettings):
     # comparable across agents if every agent was measured by the same judge, and
     # letting a tenant choose its own would let it choose a lenient one.
     #
-    # Defaults to the platform's default chat model rather than something cheap.
-    # A weak judge does not produce slightly worse scores, it produces noise, and
-    # a noisy audit trail is worse than none because people act on it.
+    # Defaults onto OpenAI rather than onto the platform's default *chat* model,
+    # which is Anthropic's. The embedding provider is pinned to OpenAI, so an
+    # OpenAI key is the one credential a running platform is guaranteed to hold;
+    # an Anthropic default would leave the evaluation harness returning 503 on a
+    # perfectly valid deployment that never configured a second provider.
     #
-    # Spelled out rather than imported from `app/models/agent.py`: settings are
-    # loaded before anything else, and reaching up into the model layer from here
-    # would make importing configuration register SQLModel tables as a side
-    # effect. The two defaults agreeing is a coincidence worth keeping, not a
-    # constraint worth a layering violation.
-    evaluation_judge_model: str = "claude-sonnet-5"
+    # A small model is a defensible judge here specifically because the rubric
+    # asks it for binary judgements — does this sentence follow from that
+    # paragraph — and never for a calibrated score. That was a design choice
+    # about model reliability; this is the payoff. Point it at a larger model if
+    # the audit trail warrants one.
+    evaluation_judge_model: str = "gpt-4o-mini"
     # Room for a claim-by-claim breakdown of a long answer. A judgement truncated
     # mid-JSON is unparseable, which costs the whole evaluation.
     evaluation_judge_max_output_tokens: int = 2048

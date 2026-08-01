@@ -277,6 +277,93 @@ class ConversationMessageResponse(BaseModel):
     created_at: datetime
 
 
+class EvaluationClaim(BaseModel):
+    """One factual assertion lifted out of an answer, and whether it held up."""
+
+    claim: str
+    supported: bool
+    # The source numbers carrying the claim, as numbered in the answer's own
+    # citations. Empty when nothing carried it.
+    sources: list[int]
+
+
+class EvaluationRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Re-judge turns that already have a score under the current rubric. Off by
+    # default so an interrupted backfill can simply be run again without paying
+    # for the turns it already scored.
+    refresh: bool = False
+
+
+class TurnEvaluationResponse(BaseModel):
+    """The platform's judgement of one served turn.
+
+    `score` is null for an abstention rather than 1.0 — an answer that asserts
+    nothing asserts nothing false, and scoring it perfect would let a retriever
+    that finds nothing report flawless grounding. The verdict says which case
+    this is; anything averaging `score` must skip the nulls.
+    """
+
+    id: uuid.UUID
+    message_id: uuid.UUID
+    evaluator: str
+    rubric_version: str
+    score: float | None
+    verdict: Literal["supported", "partial", "unsupported", "abstained"]
+    rationale: str | None
+    # The breakdown the score was computed from. A bare 0.67 tells a team owner
+    # their agent is wrong a third of the time and nothing about which third.
+    claims: list[EvaluationClaim]
+    # What the search that fed this answer thought of its own best match,
+    # recorded next to the judgement of the answer. The pair is the calibration
+    # question.
+    retrieval_top_score: float | None
+    citation_count: int
+    judge_model: str | None
+    judge_provider: str | None
+    usage: TokenUsageResponse
+    latency_ms: int
+    created_at: datetime
+
+
+class CalibrationBucketResponse(BaseModel):
+    lower: float
+    # Absent on the top band, which is open-ended.
+    upper: float | None
+    evaluations: int
+    graded: int
+    mean_score: float | None
+    abstentions: int
+
+
+class FloorRecommendationResponse(BaseModel):
+    # Null when the data does not support a recommendation, which is a result
+    # and not an error — `rationale` says which of the reasons applies.
+    floor: float | None
+    rationale: str
+    # What the floor would cost. Turns below it do not become better answers,
+    # they become abstentions.
+    turns_that_would_abstain: int
+
+
+class CalibrationReportResponse(BaseModel):
+    """How retrieval scores map onto answer groundedness, in bands.
+
+    Scoped to one rubric version: averaging across rubrics would compare numbers
+    produced by different questions and read a change of measurement as a change
+    in what is being measured.
+    """
+
+    agent_id: uuid.UUID | None
+    rubric_version: str
+    evaluations: int
+    graded: int
+    mean_score: float | None
+    buckets: list[CalibrationBucketResponse]
+    recommendation: FloorRecommendationResponse
+
+
 class AgentChatResponse(BaseModel):
     # Echoed on every turn — a caller that omitted it is being told which thread
     # its question landed in, and needs it to ask a follow-up.

@@ -105,20 +105,34 @@ def _judge_agent(*, tenant_id: uuid.UUID, settings: Settings) -> Agent:
 
 
 async def _load_target(
-    session: AsyncSession, *, tenant_id: uuid.UUID, message_id: uuid.UUID
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    message_id: uuid.UUID,
+    conversation_id: uuid.UUID | None = None,
 ) -> tuple[ConversationMessage, Conversation, Agent]:
-    """Resolve the message, checking tenancy on the way rather than after."""
+    """Resolve the message, checking tenancy on the way rather than after.
+
+    `conversation_id` is an additional predicate rather than a separate lookup
+    and a comparison afterwards. A caller that addresses one of its own turns
+    through the wrong thread gets the same not-found as a caller that invented
+    the id, which is the point: any check performed after the row is in hand is
+    a check somebody can forget to perform.
+    """
+    conditions = [
+        ConversationMessage.id == message_id,
+        # The ownership filter is part of the lookup, so a message id guessed
+        # from another tenant is indistinguishable from one that does not exist.
+        Conversation.tenant_id == tenant_id,
+    ]
+    if conversation_id is not None:
+        conditions.append(ConversationMessage.conversation_id == conversation_id)
+
     row = (
         await session.execute(
             select(ConversationMessage, Conversation)
             .join(Conversation, Conversation.id == ConversationMessage.conversation_id)
-            .where(
-                ConversationMessage.id == message_id,
-                # The ownership filter is part of the lookup, so a message id
-                # guessed from another tenant is indistinguishable from one that
-                # does not exist.
-                Conversation.tenant_id == tenant_id,
-            )
+            .where(*conditions)
         )
     ).first()
     if row is None:
@@ -281,6 +295,7 @@ async def evaluate_message(
     *,
     tenant_id: uuid.UUID,
     message_id: uuid.UUID,
+    conversation_id: uuid.UUID | None = None,
     settings: Settings | None = None,
     refresh: bool = False,
 ) -> TurnEvaluation:
@@ -293,7 +308,7 @@ async def evaluate_message(
     """
     settings = settings or get_settings()
     message, conversation, agent = await _load_target(
-        session, tenant_id=tenant_id, message_id=message_id
+        session, tenant_id=tenant_id, message_id=message_id, conversation_id=conversation_id
     )
 
     stored = await _existing(session, message_id=message_id)
@@ -437,15 +452,33 @@ async def evaluate_conversation(
 
 
 async def list_evaluations(
-    session: AsyncSession, *, tenant_id: uuid.UUID, message_id: uuid.UUID
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    message_id: uuid.UUID,
+    conversation_id: uuid.UUID | None = None,
 ) -> list[TurnEvaluation]:
-    """Every judgement on file for one turn, newest rubric first."""
-    result = await session.scalars(
-        select(TurnEvaluation)
-        .where(
-            TurnEvaluation.tenant_id == tenant_id,
-            TurnEvaluation.message_id == message_id,
+    """Every judgement on file for one turn, newest first.
+
+    Scoped by conversation when the caller names one, for the same reason the
+    write path is: a turn addressed through a thread it does not belong to must
+    read as absent rather than as somebody else's row served under the wrong
+    path.
+    """
+    conditions = [
+        TurnEvaluation.tenant_id == tenant_id,
+        TurnEvaluation.message_id == message_id,
+    ]
+    if conversation_id is not None:
+        conditions.append(
+            TurnEvaluation.message_id.in_(
+                select(ConversationMessage.id).where(
+                    ConversationMessage.conversation_id == conversation_id
+                )
+            )
         )
-        .order_by(TurnEvaluation.created_at.desc())
+
+    result = await session.scalars(
+        select(TurnEvaluation).where(*conditions).order_by(TurnEvaluation.created_at.desc())
     )
     return list(result.all())
