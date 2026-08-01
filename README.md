@@ -7,14 +7,15 @@ prompt, model, tool allowlist, knowledge scope — and the platform owns the sha
 **Onboarding a new assistant is a configuration change, not a deployment.** Two agents diverge in
 behaviour entirely through the values in their rows: no branch in the code, no redeploy.
 
-Built on FastAPI, PostgreSQL/pgvector, and Redis. Today the shared runtime covers tenant isolation,
+Built on FastAPI, PostgreSQL/pgvector, and Redis. The shared runtime covers tenant isolation,
 knowledge scoping, ingestion, retrieval, multi-provider model routing, orchestration, conversation
-memory, streaming, MCP tool integration, and observability; evaluation is on the roadmap below.
+memory, streaming, MCP tool integration, observability, and evaluation of what the agents actually
+answered.
 
 ## Status
 
-Under active development. This README documents **only what is implemented**; the roadmap below is
-explicitly marked as not-yet-built.
+Feature-complete against its original scope. This README documents **only what is implemented**;
+anything not built is under the explicitly-marked backlog below.
 
 **Implemented**
 
@@ -87,12 +88,63 @@ explicitly marked as not-yet-built.
 - Postgres + pgvector and Redis via Docker Compose, with Prometheus, Grafana, and Jaeger behind an
   `observability` profile; Alembic migrations; multi-stage app image.
 
-**Roadmap (not yet implemented)**
+**Backlog (not implemented)**
 
-Federated auth (OIDC/SSO) · async ingestion via Celery/RabbitMQ · queued/scheduled evaluation runs
-(the harness is synchronous today) · Kubernetes manifests · CI/CD.
+Federated auth (OIDC/SSO) · async ingestion via Celery/RabbitMQ · queued and scheduled evaluation
+runs (the harness is synchronous today, and idempotent, which is what would make a queue easy to
+add) · alert rules and SLOs · Redis-backed MCP discovery cache (in-process today, wrong for many
+replicas) · transcript pagination · OAuth for MCP servers (bearer tokens only) · per-tenant usage
+rollup · Kubernetes manifests · CI/CD.
+
+One deliberate non-item: retrieval still has no relevance-score floor. It is now *measurable* rather
+than guessable — see [Evaluation](#evaluation) — but choosing a threshold trades ungrounded answers
+for abstentions, which is an operator's call to make against their own corpus, not a default to ship.
 
 ## Architecture
+
+### Roles and flows
+
+The platform exists to separate who owns what. A **platform team** owns the runtime; a **team owner**
+configures an assistant without writing code; an **end user** asks it questions. That split is what
+"configuration, not deployment" has to mean concretely, and it produces three flows that share a
+database and almost no code.
+
+```mermaid
+flowchart TB
+    TO(["Team owner"])
+    EU(["End user"])
+
+    TO -->|"A · configure, once"| CFG["POST /agents<br/>POST /collections/{id}/documents<br/>POST /mcp-servers"]
+    CFG --> ING["extract → chunk → embed"]
+
+    ING --> DB
+    CFG --> DB
+
+    subgraph DB["Shared state — Postgres"]
+        CONFIG[("agents · collections<br/>mcp_servers")]
+        VEC[("document_chunks<br/>pgvector")]
+        TRANS[("conversations<br/>conversation_messages")]
+        EVALS[("turn_evaluations")]
+    end
+
+    EU -->|"B · answer, per request"| CHAT["POST /agents/{id}/chat"]
+    CHAT --> GRAPH["LangGraph turn<br/>retrieve → generate ⇄ tools"]
+    CONFIG --> GRAPH
+    VEC --> GRAPH
+    GRAPH --> LLM(["OpenAI / Anthropic"])
+    GRAPH --> REMOTE(["tenant MCP servers"])
+    GRAPH --> TRANS
+
+    TRANS -.->|"C · audit, afterwards"| JUDGE["groundedness judge"]
+    JUDGE --> EVALS
+    EVALS --> CAL["calibration report"]
+```
+
+Flow C hangs off the transcript by a dotted line on purpose: nothing on the request path waits for
+it, so an evaluator outage costs the platform its scores and never its answers. Flow B reads config
+it never wrote, which is the whole thesis — the runtime is a constant and the agent is a row.
+
+### Layers
 
 | Layer | Package | Responsibility |
 |---|---|---|
@@ -120,6 +172,64 @@ product record — tenant-scoped, queryable, and the only thing history is ever 
 checkpointer is the execution record, keyed by an opaque thread id, and is what makes a turn
 resumable rather than restartable. Neither can do the other's job: a checkpoint cannot say which
 tenant owns it, and a transcript cannot resume a half-finished tool loop.
+
+### The turn
+
+One compiled graph serves every agent on the platform. It branches on **configuration values**, never
+on tenant or agent identity — an agent with a collection routes through retrieval, one without goes
+straight to generation, and that is the only difference between them in code.
+
+```mermaid
+stateDiagram-v2
+    [*] --> retrieve: agent has a collection
+    [*] --> generate: pure-tool agent
+    retrieve --> generate
+    generate --> tools: model asked for a tool
+    generate --> [*]: answer
+    tools --> generate
+```
+
+The loop back into `generate` is bounded twice over: schemas are withheld once the step cap is
+reached, and the router re-checks the cap independently, because a model can emit a call it was
+never offered. The first is graceful, the second is the guarantee.
+
+### Data model
+
+Every tenant-owned table carries `tenant_id` and every query that touches one filters on it. Tenancy
+lives in foreign keys and predicates — never in a prompt.
+
+```mermaid
+erDiagram
+    TENANTS ||--o{ API_KEYS : "authenticates via"
+    TENANTS ||--o{ COLLECTIONS : owns
+    TENANTS ||--o{ AGENTS : owns
+    TENANTS ||--o{ MCP_SERVERS : registers
+    TENANTS ||--o{ CONVERSATIONS : owns
+    TENANTS ||--o{ TURN_EVALUATIONS : owns
+    COLLECTIONS ||--o{ DOCUMENTS : scopes
+    DOCUMENTS ||--o{ DOCUMENT_CHUNKS : "chunked into"
+    COLLECTIONS |o--o{ AGENTS : "knowledge scope"
+    AGENTS ||--o{ CONVERSATIONS : produced
+    CONVERSATIONS ||--o{ CONVERSATION_MESSAGES : transcript
+    CONVERSATION_MESSAGES ||--o{ TURN_EVALUATIONS : judged
+    AGENTS ||--o{ TURN_EVALUATIONS : "scored for"
+```
+
+Three relationships carry more weight than their arrows suggest:
+
+- **`agents.collection_id` is nullable, `ON DELETE SET NULL`.** A pure-tool agent is valid, and
+  deleting a collection disables retrieval for its agents rather than cascading them out of existence.
+- **`document_chunks` is the only table with an embedding**, indexed with a hand-written pgvector
+  HNSW index that Alembic autogenerate is explicitly guarded from dropping.
+- **`turn_evaluations` hangs off a message, not beside it.** An opinion about a turn arrives later
+  and may arrive again under a better rubric, so it does not live in the record it judges. It
+  carries `tenant_id` and `agent_id` of its own rather than reaching them through two joins — the
+  ownership filter on every read has to be a predicate on the table being read, not a join a future
+  query can forget to write.
+
+LangGraph's four `checkpoint*` tables sit alongside these, created and versioned by the library
+itself. Autogenerate is guarded from proposing to drop those too — it would take every in-flight
+conversation with it.
 
 ### Observability
 
