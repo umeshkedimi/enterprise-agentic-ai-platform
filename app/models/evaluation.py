@@ -54,7 +54,15 @@ VERDICTS = (VERDICT_SUPPORTED, VERDICT_PARTIAL, VERDICT_UNSUPPORTED, VERDICT_ABS
 # scores incomparable. Versioning it is what keeps a rubric change from looking
 # like a regression in the platform: old rows keep the version they were scored
 # under, and a chart can group by it instead of averaging across a discontinuity.
-RUBRIC_VERSION = "v1"
+#
+# v2: a live run against a real judge showed two ways a score came out too high.
+# Remarks about what the sources *do not* contain were being counted as supported
+# claims, and figures the answer computed for itself from a rule in the sources
+# were being credited to the sources. Both are now called out in the rubric, and
+# the first is additionally enforced platform-side — a claim marked supported
+# while naming no source is not supported. Scores under v1 and v2 are not
+# comparable, which is exactly what this constant is for.
+RUBRIC_VERSION = "v2"
 
 
 def _utcnow() -> datetime:

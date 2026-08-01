@@ -34,6 +34,16 @@ def judge_reply(payload: dict, *, model: str = "gpt-4o-mini"):
     )
 
 
+def one_supported(notes: str = ""):
+    """A minimal well-formed verdict: one claim, carried by source 1.
+
+    Naming the source is not padding. The platform treats "supported" with an
+    empty source list as unsupported, because that combination is the judge
+    agreeing with the answer rather than checking it.
+    """
+    return {"claims": [{"claim": "a", "supported": True, "sources": [1]}], "notes": notes}
+
+
 def answer_reply(text: str, *, model: str = "gpt-4o-mini"):
     return SimpleNamespace(
         model=model,
@@ -251,7 +261,7 @@ async def test_re_evaluating_returns_the_stored_row_without_calling_the_judge(
     url = evaluation_url(agent_id, conversation_id, message_id)
 
     scripted_provider.queue.append(
-        judge_reply({"claims": [{"claim": "a", "supported": True}], "notes": "first"})
+        judge_reply(one_supported("first"))
     )
     first = await client.post(url)
     calls_after_first = len(scripted_provider.calls)
@@ -278,7 +288,7 @@ async def test_refresh_re_judges_the_same_row(
     assert first.json()["verdict"] == "unsupported"
 
     scripted_provider.queue.append(
-        judge_reply({"claims": [{"claim": "a", "supported": True}], "notes": "second pass"})
+        judge_reply(one_supported("second pass"))
     )
     second = await client.post(url, json={"refresh": True})
 
@@ -395,7 +405,7 @@ async def test_evaluating_a_conversation_judges_every_assistant_turn(
 
     for _ in range(2):
         scripted_provider.queue.append(
-            judge_reply({"claims": [{"claim": "a", "supported": True}], "notes": ""})
+            judge_reply(one_supported())
         )
     r = await client.post(f"/agents/{agent_id}/conversations/{conversation_id}/evaluations")
 
@@ -412,7 +422,7 @@ async def test_calibration_reports_the_bands_without_recommending_from_thin_data
     agent_id, conversation_id, message_id = await served_turn(client, scripted_provider)
 
     scripted_provider.queue.append(
-        judge_reply({"claims": [{"claim": "a", "supported": True}], "notes": ""})
+        judge_reply(one_supported())
     )
     await client.post(evaluation_url(agent_id, conversation_id, message_id))
 
@@ -457,7 +467,7 @@ async def test_the_judges_tokens_are_counted_apart_from_served_turns(
     before_serving, before_evaluation = tokens("serving"), tokens("evaluation")
 
     scripted_provider.queue.append(
-        judge_reply({"claims": [{"claim": "a", "supported": True}], "notes": ""})
+        judge_reply(one_supported())
     )
     await client.post(evaluation_url(agent_id, conversation_id, message_id))
 
@@ -510,7 +520,7 @@ async def test_tenant_calibration_sees_the_same_row_as_agent_calibration(
     agent_id, conversation_id, message_id = await served_turn(client, scripted_provider)
 
     scripted_provider.queue.append(
-        judge_reply({"claims": [{"claim": "a", "supported": True}], "notes": ""})
+        judge_reply(one_supported())
     )
     await client.post(evaluation_url(agent_id, conversation_id, message_id))
 

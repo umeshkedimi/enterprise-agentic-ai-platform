@@ -130,6 +130,30 @@ def test_normalise_treats_a_missing_supported_flag_as_unsupported():
     assert claims[0]["supported"] is False
 
 
+def test_a_claim_supported_by_no_source_is_not_supported():
+    """Found by running the real judge, not by reasoning about it.
+
+    Support means a source carries the claim, so "supported" with an empty source
+    list is the judge agreeing with the answer rather than checking it. A live
+    run produced exactly that — an answer's own remarks about what the documents
+    did *not* contain came back flagged supported with no sources, and each one
+    inflated the score it was counted in. The rubric now says so and this makes
+    it true regardless.
+    """
+    claims = service._normalise_claims(
+        [
+            {"claim": "carried by a source", "supported": True, "sources": [1]},
+            {"claim": "the documents do not mention parental leave", "supported": True},
+            {"claim": "supported but citing nothing", "supported": True, "sources": []},
+        ],
+        limit=10,
+    )
+
+    assert [c["supported"] for c in claims] == [True, False, False]
+    # And the score follows, rather than reporting a perfect answer.
+    assert service._score(claims)[0] == pytest.approx(1 / 3)
+
+
 # --- What the judge is shown -------------------------------------------------
 
 

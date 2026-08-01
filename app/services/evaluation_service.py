@@ -264,11 +264,19 @@ def _normalise_claims(raw: Sequence[Any], *, limit: int) -> list[dict]:
         text = str(entry.get("claim", "")).strip()
         if not text:
             continue
+        sources = _source_numbers(entry.get("sources"))
         claims.append(
             {
                 "claim": text[:_CLAIM_MAX_CHARS],
-                "supported": bool(entry.get("supported")),
-                "sources": _source_numbers(entry.get("sources")),
+                # Support means a source carries the claim, so a claim the judge
+                # called supported while naming no source is not supported — it
+                # is the judge agreeing with the answer. Enforced here rather
+                # than asked for in the rubric because a live run showed it
+                # happening: an answer's own remarks about what the documents do
+                # not contain came back flagged supported with an empty source
+                # list, and each one inflated the score it was counted in.
+                "supported": bool(entry.get("supported")) and bool(sources),
+                "sources": sources,
             }
         )
     return claims
