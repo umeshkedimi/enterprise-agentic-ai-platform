@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A superseded run on the same branch is telling you about code nobody is
+# looking at any more.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Everything that needs nothing running. Fast, and it is what fails most
+  # often, so it is worth having answer before the database has even started.
+  lint-and-unit:
+    name: Lint + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      # `app/` only: migrations under alembic/ are generated boilerplate.
+      - name: Lint
+        run: uv run ruff check app/
+
+      - name: Unit tests
+        run: uv run pytest tests/unit -v
+
+  integration:
+    name: Integration tests
+    runs-on: ubuntu-latest
+
+    services:
+      # pgvector's own image, matching docker-compose.yaml — the extension has
+      # to exist before a migration can create a vector column. The extension
+      # itself is created by the initial migration, so no init script is needed.
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: eaap
+          POSTGRES_PASSWORD: eaap
+          POSTGRES_DB: eaap
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U eaap -d eaap"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://eaap:eaap@localhost:5432/eaap
+      DATABASE_URL_SYNC: postgresql+psycopg://eaap:eaap@localhost:5432/eaap
+      REDIS_URL: redis://localhost:6379/0
+      # Provider credentials are deliberately absent: the integration suite sets
+      # its own fakes per test and stubs the two network calls (embeddings and
+      # the chat provider). A real key reaching this job would mean a test is
+      # dialling out, which is the thing to notice.
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Apply migrations
+        run: uv run alembic upgrade head
+
+      # Catches a model changed without a migration. Kept after the upgrade so
+      # it compares metadata against a database that is actually current.
+      - name: Check for migration drift
+        run: uv run alembic check
+
+      - name: Integration tests
+        run: uv run pytest tests/integration -v

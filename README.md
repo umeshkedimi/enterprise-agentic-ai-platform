@@ -488,6 +488,11 @@ uv run pytest tests/integration -v   # requires Postgres
 The suite never calls a model provider: completions are faked at the LiteLLM boundary and the
 ingestion tests avoid the embedding API, so tests run offline and need no vendor credentials.
 
+Both halves run in CI (`.github/workflows/ci.yml`) on every push and pull request — lint and unit
+tests with no services, then the integration suite against a real pgvector Postgres, preceded by
+`alembic upgrade head` and `alembic check` so a model changed without a migration fails the build.
+No provider credentials are configured for the job on purpose: a test that dials out fails there.
+
 ## API
 
 Tenant-scoped routes authenticate with `Authorization: Bearer <api-key>`; admin routes require the
@@ -522,7 +527,7 @@ Tenant-scoped routes authenticate with `Authorization: Bearer <api-key>`; admin 
 | POST | `/agents/{id}/conversations/{cid}/evaluations` | tenant | Judge every assistant turn in a thread |
 | GET | `/agents/{id}/calibration` | tenant | What this agent's retrieval scores were worth |
 | GET | `/evaluations/calibration` | tenant | The same reading across the tenant, with a floor recommendation |
-| POST | `/collections/{id}/documents` | tenant | Upload a pdf/txt/markdown document |
+| POST | `/collections/{id}/documents` | tenant | Upload a pdf/txt/markdown document (413 above `MAX_UPLOAD_BYTES`) |
 | GET | `/collections/{id}/documents` | tenant | List documents with chunk counts |
 | DELETE | `/documents/{id}` | tenant | Delete a document and its chunks |
 
