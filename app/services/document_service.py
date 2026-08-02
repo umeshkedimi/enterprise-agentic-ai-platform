@@ -9,6 +9,7 @@ from app.models.document import Document, DocumentChunk, DocumentStatus
 from app.services.chunking import chunk_text, count_tokens, extract_text
 from app.services.embedding_service import embed_texts
 from app.services.errors import NotFoundError
+from app.services.pagination import DEFAULT_PAGE_LIMIT, paginate, split_page
 
 logger = get_logger(__name__)
 
@@ -94,20 +95,27 @@ async def upload_document(
 
 
 async def list_documents(
-    session: AsyncSession, *, tenant_id: uuid.UUID, collection_id: uuid.UUID
-) -> list[tuple[Document, int]]:
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    collection_id: uuid.UUID,
+    limit: int = DEFAULT_PAGE_LIMIT,
+    offset: int = 0,
+) -> tuple[list[tuple[Document, int]], bool]:
     await _assert_collection_in_tenant(
         session, tenant_id=tenant_id, collection_id=collection_id
     )
-    stmt = (
+    stmt = paginate(
         select(Document, func.count(DocumentChunk.id))
         .outerjoin(DocumentChunk, DocumentChunk.document_id == Document.id)
         .where(Document.collection_id == collection_id)
         .group_by(Document.id)
-        .order_by(Document.uploaded_at.desc())
+        .order_by(Document.uploaded_at.desc()),
+        limit=limit,
+        offset=offset,
     )
     result = await session.execute(stmt)
-    return [(doc, count) for doc, count in result.all()]
+    return split_page([(doc, count) for doc, count in result.all()], limit)
 
 
 async def delete_document(

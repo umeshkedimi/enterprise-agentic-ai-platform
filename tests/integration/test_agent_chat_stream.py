@@ -134,7 +134,7 @@ async def test_a_streamed_turn_is_recorded_like_any_other(
     assert done["citations"], "a grounded stream still cites its sources"
 
     messages = await client.get(f"/agents/{agent_id}/conversations/{conversation_id}/messages")
-    body = messages.json()
+    body = messages.json()["items"]
     # Recorded before `done` is sent, so a client that reconnects on that event
     # finds the turn it just watched.
     assert [m["role"] for m in body] == ["user", "assistant"]

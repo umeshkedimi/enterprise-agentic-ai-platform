@@ -21,6 +21,7 @@ from app.models.conversation import Conversation, ConversationMessage
 from app.models.schemas import Citation
 from app.services.completion_service import TokenUsage, Turn
 from app.services.errors import NotFoundError
+from app.services.pagination import DEFAULT_PAGE_LIMIT, paginate, split_page
 
 logger = get_logger(__name__)
 
@@ -67,14 +68,22 @@ async def get_conversation(
 
 
 async def list_conversations(
-    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
-) -> list[Conversation]:
-    result = await session.scalars(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    limit: int = DEFAULT_PAGE_LIMIT,
+    offset: int = 0,
+) -> tuple[list[Conversation], bool]:
+    stmt = paginate(
         select(Conversation)
         .where(Conversation.tenant_id == tenant_id, Conversation.agent_id == agent_id)
-        .order_by(Conversation.updated_at.desc())
+        .order_by(Conversation.updated_at.desc()),
+        limit=limit,
+        offset=offset,
     )
-    return list(result.all())
+    result = await session.scalars(stmt)
+    return split_page(list(result.all()), limit)
 
 
 async def resolve_conversation(
@@ -105,14 +114,28 @@ async def resolve_conversation(
 
 
 async def list_messages(
-    session: AsyncSession, *, conversation_id: uuid.UUID
-) -> list[ConversationMessage]:
-    result = await session.scalars(
+    session: AsyncSession,
+    *,
+    conversation_id: uuid.UUID,
+    limit: int = DEFAULT_PAGE_LIMIT,
+    offset: int = 0,
+) -> tuple[list[ConversationMessage], bool]:
+    """A window onto the transcript, oldest first.
+
+    The one list here with no ceiling at all — a thread grows for as long as
+    somebody keeps talking. Ascending `seq` order is also the one case where an
+    offset is genuinely stable: rows are only ever appended, so a page taken
+    from the start means the same thing a minute later.
+    """
+    stmt = paginate(
         select(ConversationMessage)
         .where(ConversationMessage.conversation_id == conversation_id)
-        .order_by(ConversationMessage.seq)
+        .order_by(ConversationMessage.seq),
+        limit=limit,
+        offset=offset,
     )
-    return list(result.all())
+    result = await session.scalars(stmt)
+    return split_page(list(result.all()), limit)
 
 
 async def load_history(

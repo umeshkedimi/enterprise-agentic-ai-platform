@@ -88,7 +88,7 @@ async def served_turn(client, scripted_provider, *, answer="Twenty-five days [1]
 
     r = await client.get(f"/agents/{agent_id}/conversations/{conversation_id}/messages")
     assert r.status_code == 200, r.text
-    assistant = [m for m in r.json() if m["role"] == "assistant"]
+    assistant = [m for m in r.json()["items"] if m["role"] == "assistant"]
     return agent_id, conversation_id, assistant[-1]["id"]
 
 
@@ -332,7 +332,7 @@ async def test_a_user_turn_cannot_be_evaluated(
     agent_id, conversation_id, _ = await served_turn(client, scripted_provider)
 
     r = await client.get(f"/agents/{agent_id}/conversations/{conversation_id}/messages")
-    user_message_id = next(m["id"] for m in r.json() if m["role"] == "user")
+    user_message_id = next(m["id"] for m in r.json()["items"] if m["role"] == "user")
 
     r = await client.post(evaluation_url(agent_id, conversation_id, user_message_id))
     assert r.status_code == 409
@@ -350,7 +350,7 @@ async def test_an_agent_with_no_knowledge_scope_cannot_be_judged_for_grounding(
     conversation_id = r.json()["conversation_id"]
 
     r = await client.get(f"/agents/{agent_id}/conversations/{conversation_id}/messages")
-    message_id = next(m["id"] for m in r.json() if m["role"] == "assistant")
+    message_id = next(m["id"] for m in r.json()["items"] if m["role"] == "assistant")
 
     r = await client.post(evaluation_url(agent_id, conversation_id, message_id))
     assert r.status_code == 409

@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.logging import get_logger
 from app.models.agent import Agent, Collection
 from app.services.errors import NotFoundError, SlugAlreadyExistsError
+from app.services.pagination import DEFAULT_PAGE_LIMIT, paginate, split_page
 
 logger = get_logger(__name__)
 
@@ -89,11 +90,20 @@ async def create_agent(
     return agent
 
 
-async def list_agents(session: AsyncSession, *, tenant_id: uuid.UUID) -> list[Agent]:
-    result = await session.scalars(
-        select(Agent).where(Agent.tenant_id == tenant_id).order_by(Agent.created_at.desc())
+async def list_agents(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    limit: int = DEFAULT_PAGE_LIMIT,
+    offset: int = 0,
+) -> tuple[list[Agent], bool]:
+    stmt = paginate(
+        select(Agent).where(Agent.tenant_id == tenant_id).order_by(Agent.created_at.desc()),
+        limit=limit,
+        offset=offset,
     )
-    return list(result.all())
+    result = await session.scalars(stmt)
+    return split_page(list(result.all()), limit)
 
 
 async def get_agent(

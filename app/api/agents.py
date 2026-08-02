@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents import runner
 from app.api import sse
-from app.api.deps import get_current_tenant
+from app.api.deps import PageParams, get_current_tenant, page_params
 from app.core.config import get_settings
 from app.db.session import async_session_factory, get_db_session
 from app.models.agent import Agent
@@ -23,6 +23,7 @@ from app.models.schemas import (
     ConversationCreate,
     ConversationMessageResponse,
     ConversationResponse,
+    Page,
     TokenUsageResponse,
 )
 from app.models.tenant import Tenant
@@ -158,13 +159,21 @@ async def create_agent(
     return _to_response(agent)
 
 
-@router.get("", response_model=list[AgentResponse])
+@router.get("", response_model=Page[AgentResponse])
 async def list_agents(
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
-) -> list[AgentResponse]:
-    agents = await agent_service.list_agents(session, tenant_id=tenant.id)
-    return [_to_response(a) for a in agents]
+    page: PageParams = Depends(page_params),
+) -> Page[AgentResponse]:
+    agents, has_more = await agent_service.list_agents(
+        session, tenant_id=tenant.id, limit=page.limit, offset=page.offset
+    )
+    return Page(
+        items=[_to_response(a) for a in agents],
+        limit=page.limit,
+        offset=page.offset,
+        has_more=has_more,
+    )
 
 
 @router.get("/{agent_id}", response_model=AgentResponse)
@@ -261,36 +270,45 @@ async def create_conversation(
     return _to_conversation_response(conversation)
 
 
-@router.get("/{agent_id}/conversations", response_model=list[ConversationResponse])
+@router.get("/{agent_id}/conversations", response_model=Page[ConversationResponse])
 async def list_conversations(
     agent_id: uuid.UUID,
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
-) -> list[ConversationResponse]:
+    page: PageParams = Depends(page_params),
+) -> Page[ConversationResponse]:
     try:
         agent = await agent_service.get_agent(session, tenant_id=tenant.id, agent_id=agent_id)
     except NotFoundError as exc:
         raise _NOT_FOUND from exc
 
-    conversations = await conversation_service.list_conversations(
-        session, tenant_id=tenant.id, agent_id=agent.id
+    conversations, has_more = await conversation_service.list_conversations(
+        session, tenant_id=tenant.id, agent_id=agent.id, limit=page.limit, offset=page.offset
     )
-    return [_to_conversation_response(c) for c in conversations]
+    return Page(
+        items=[_to_conversation_response(c) for c in conversations],
+        limit=page.limit,
+        offset=page.offset,
+        has_more=has_more,
+    )
 
 
 @router.get(
     "/{agent_id}/conversations/{conversation_id}/messages",
-    response_model=list[ConversationMessageResponse],
+    response_model=Page[ConversationMessageResponse],
 )
 async def list_conversation_messages(
     agent_id: uuid.UUID,
     conversation_id: uuid.UUID,
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
-) -> list[ConversationMessageResponse]:
-    """The full transcript, including turns older than the replay window.
+    page: PageParams = Depends(page_params),
+) -> Page[ConversationMessageResponse]:
+    """The transcript, oldest first, including turns older than the replay window.
 
-    The window bounds what the *model* is shown, not what the platform keeps.
+    The window bounds what the *model* is shown, not what the platform keeps —
+    and this page bounds what one request will serve, which is a different limit
+    again. A thread is the one list here that grows without any ceiling.
     """
     try:
         agent = await agent_service.get_agent(session, tenant_id=tenant.id, agent_id=agent_id)
@@ -300,8 +318,15 @@ async def list_conversation_messages(
     except NotFoundError as exc:
         raise _CONVERSATION_NOT_FOUND from exc
 
-    messages = await conversation_service.list_messages(session, conversation_id=conversation.id)
-    return [_to_message_response(m) for m in messages]
+    messages, has_more = await conversation_service.list_messages(
+        session, conversation_id=conversation.id, limit=page.limit, offset=page.offset
+    )
+    return Page(
+        items=[_to_message_response(m) for m in messages],
+        limit=page.limit,
+        offset=page.offset,
+        has_more=has_more,
+    )
 
 
 @router.post("/{agent_id}/chat", response_model=AgentChatResponse)

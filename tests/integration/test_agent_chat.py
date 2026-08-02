@@ -257,7 +257,7 @@ async def test_the_transcript_records_what_the_answer_cost_and_cited(
     messages = await client.get(f"/agents/{agent_id}/conversations/{conversation_id}/messages")
 
     assert messages.status_code == 200, messages.text
-    body = messages.json()
+    body = messages.json()["items"]
     assert [m["role"] for m in body] == ["user", "assistant"]
     assert body[0]["content"] == "How much leave?"
     # Provenance is stored with the turn, not recomputed later: reconfiguring the
@@ -290,7 +290,7 @@ async def test_a_failed_turn_records_nothing(
     messages = await client.get(f"/agents/{agent_id}/conversations/{conversation_id}/messages")
     # A question stored without its answer would be replayed next turn as an
     # exchange the assistant ignored.
-    assert messages.json() == []
+    assert messages.json()["items"] == []
 
 
 async def test_history_window_never_starts_the_replay_on_an_assistant_turn(

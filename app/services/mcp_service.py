@@ -23,6 +23,7 @@ from app.services.errors import (
     SlugAlreadyExistsError,
     UnsafeServerUrlError,
 )
+from app.services.pagination import DEFAULT_PAGE_LIMIT, paginate, split_page
 
 logger = get_logger(__name__)
 
@@ -95,13 +96,22 @@ async def create_server(
     return server
 
 
-async def list_servers(session: AsyncSession, *, tenant_id: uuid.UUID) -> list[McpServer]:
-    result = await session.scalars(
+async def list_servers(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    limit: int = DEFAULT_PAGE_LIMIT,
+    offset: int = 0,
+) -> tuple[list[McpServer], bool]:
+    stmt = paginate(
         select(McpServer)
         .where(McpServer.tenant_id == tenant_id)
-        .order_by(McpServer.created_at.desc())
+        .order_by(McpServer.created_at.desc()),
+        limit=limit,
+        offset=offset,
     )
-    return list(result.all())
+    result = await session.scalars(stmt)
+    return split_page(list(result.all()), limit)
 
 
 async def list_enabled_servers(
@@ -112,6 +122,11 @@ async def list_enabled_servers(
     Separate from `list_servers` because a disabled server must stay visible to
     its owner in the API and invisible to the runtime — the same split `enabled`
     has on an agent.
+
+    Deliberately *not* paginated, unlike its sibling. This answers a question the
+    runtime asks on the platform's behalf, not a page a client asked to browse,
+    and a resolver that silently saw only the first 50 of a tenant's servers
+    would drop tools from an allowlist with nothing to indicate why.
     """
     result = await session.scalars(
         select(McpServer)

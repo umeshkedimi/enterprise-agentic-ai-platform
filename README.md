@@ -90,11 +90,12 @@ anything not built is under the explicitly-marked backlog below.
 
 **Backlog (not implemented)**
 
-Federated auth (OIDC/SSO) · async ingestion via Celery/RabbitMQ · queued and scheduled evaluation
-runs (the harness is synchronous today, and idempotent, which is what would make a queue easy to
-add) · alert rules and SLOs · Redis-backed MCP discovery cache (in-process today, wrong for many
-replicas) · transcript pagination · OAuth for MCP servers (bearer tokens only) · per-tenant usage
-rollup · Kubernetes manifests · CI/CD.
+Federated auth (OIDC/SSO) · async ingestion via Celery/RabbitMQ (ingestion runs inside the upload
+request today, which is why an upload is size-capped) · queued and scheduled evaluation runs (the
+harness is synchronous today, and idempotent, which is what would make a queue easy to add) · alert
+rules and SLOs · Redis-backed MCP discovery cache (in-process today, wrong for many replicas) ·
+OAuth for MCP servers (bearer tokens only) · per-tenant usage rollup · Kubernetes manifests ·
+static type checking.
 
 One deliberate non-item: retrieval still has no relevance-score floor. It is now *measurable* rather
 than guessable — see [Evaluation](#evaluation) — but choosing a threshold trades ungrounded answers
@@ -449,7 +450,7 @@ CONVERSATION=$(curl -sX POST $BASE/agents/$AGENT/chat -H "$AUTH" -H "$JSON" \
 curl -sX POST $BASE/agents/$AGENT/chat -H "$AUTH" -H "$JSON" \
   -d "{\"message\":\"And for part-timers?\",\"conversation_id\":\"$CONVERSATION\"}"
 
-curl -s $BASE/agents/$AGENT/conversations/$CONVERSATION/messages -H "$AUTH"
+curl -s "$BASE/agents/$AGENT/conversations/$CONVERSATION/messages?limit=20" -H "$AUTH"
 ```
 
 The same turn, streamed:
@@ -498,6 +499,19 @@ No provider credentials are configured for the job on purpose: a test that dials
 Tenant-scoped routes authenticate with `Authorization: Bearer <api-key>`; admin routes require the
 `X-Admin-Token` header.
 
+Every list route is paginated, and returns a page rather than a bare array:
+
+```json
+{ "items": [ … ], "limit": 50, "offset": 0, "has_more": true }
+```
+
+`limit` (1–200, default 50) and `offset` are query parameters; an out-of-range value is a 422
+rather than a silent clamp, so a caller that asked for more than it can have is told rather than
+handed a truncated page it would read as complete. `has_more` is answered by reading one row past
+the window, which costs a row instead of a `COUNT(*)` on every request. The exception is
+`GET /…/evaluations`, which is bounded by a unique constraint to a handful of rows per turn and
+stays a plain array.
+
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | GET | `/health` | — | Liveness — process is up; checks no dependencies |
@@ -507,19 +521,19 @@ Tenant-scoped routes authenticate with `Authorization: Bearer <api-key>`; admin 
 | POST | `/tenants/{id}/keys` | admin | Mint an API key (plaintext returned once) |
 | GET | `/tenants/me` | tenant | Resolve the calling tenant from its key |
 | POST | `/collections` | tenant | Create a knowledge collection |
-| GET | `/collections` | tenant | List the tenant's collections |
+| GET | `/collections` | tenant | List the tenant's collections (paged) |
 | GET/DELETE | `/collections/{id}` | tenant | Fetch or delete a collection |
 | POST | `/agents` | tenant | Register an agent (config-as-data) |
-| GET | `/agents` | tenant | List the tenant's agents |
+| GET | `/agents` | tenant | List the tenant's agents (paged) |
 | GET/PATCH/DELETE | `/agents/{id}` | tenant | Fetch, update, or delete an agent |
 | POST | `/agents/{id}/chat` | tenant | Run an orchestrated turn — retrieve, then answer with citations |
 | POST | `/agents/{id}/chat/stream` | tenant | The same turn, streamed as server-sent events |
 | POST | `/agents/{id}/conversations` | tenant | Open a thread explicitly (`/chat` opens one on demand) |
-| GET | `/agents/{id}/conversations` | tenant | List the agent's threads, most recently active first |
-| GET | `/agents/{id}/conversations/{cid}/messages` | tenant | The full transcript, with per-turn citations and usage |
+| GET | `/agents/{id}/conversations` | tenant | List the agent's threads, most recently active first (paged) |
+| GET | `/agents/{id}/conversations/{cid}/messages` | tenant | The transcript, with per-turn citations and usage (paged) |
 | POST | `/agents/{id}/complete` | tenant | Run one turn on the agent's model, without retrieval |
 | POST | `/mcp-servers` | tenant | Register a remote MCP server (config-as-data) |
-| GET | `/mcp-servers` | tenant | List the tenant's MCP servers |
+| GET | `/mcp-servers` | tenant | List the tenant's MCP servers (paged) |
 | GET | `/mcp-servers/{id}/tools` | tenant | Discover its tools, under the names an allowlist uses |
 | GET/PATCH/DELETE | `/mcp-servers/{id}` | tenant | Fetch, update, or remove a server |
 | POST | `/agents/{id}/conversations/{cid}/messages/{mid}/evaluations` | tenant | Judge one turn for groundedness (idempotent; `refresh` re-judges) |
@@ -528,7 +542,7 @@ Tenant-scoped routes authenticate with `Authorization: Bearer <api-key>`; admin 
 | GET | `/agents/{id}/calibration` | tenant | What this agent's retrieval scores were worth |
 | GET | `/evaluations/calibration` | tenant | The same reading across the tenant, with a floor recommendation |
 | POST | `/collections/{id}/documents` | tenant | Upload a pdf/txt/markdown document (413 above `MAX_UPLOAD_BYTES`) |
-| GET | `/collections/{id}/documents` | tenant | List documents with chunk counts |
+| GET | `/collections/{id}/documents` | tenant | List documents with chunk counts (paged) |
 | DELETE | `/documents/{id}` | tenant | Delete a document and its chunks |
 
 Request/response contracts: `app/models/schemas.py`.

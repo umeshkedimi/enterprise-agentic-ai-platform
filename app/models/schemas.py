@@ -18,6 +18,21 @@ from app.models.mcp import DEFAULT_MCP_TIMEOUT_SECONDS
 _SLUG = {"min_length": 1, "max_length": 63, "pattern": r"^[a-z0-9][a-z0-9-]*$"}
 
 
+class Page[ItemT](BaseModel):
+    """One window onto a list, with enough context to ask for the next.
+
+    `has_more` rather than a total count: the platform reads one row past the
+    window to answer it, which is cheaper than a `COUNT(*)` on every request and
+    is the only part of a total most callers use. A client that needs an exact
+    figure is asking a different question than "is this page the last one".
+    """
+
+    items: list[ItemT]
+    limit: int
+    offset: int
+    has_more: bool
+
+
 class TenantCreate(BaseModel):
     slug: str = Field(**_SLUG)
     name: str = Field(min_length=1, max_length=255)

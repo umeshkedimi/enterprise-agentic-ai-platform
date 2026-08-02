@@ -22,6 +22,11 @@ logger = get_logger(__name__)
 MAX_TOOL_TOP_K = 10
 SNIPPET_LIMIT = 1500
 
+# How many filenames the inventory tool will put in front of the model. A
+# collection is unbounded and this text goes straight into the context window,
+# so the ceiling is the model's budget, not the tenant's upload history.
+_MAX_LISTED_DOCUMENTS = 100
+
 
 async def search_knowledge_base(context: ToolContext, query: str = "", top_k: int = 0) -> str:
     agent = context.agent
@@ -75,13 +80,23 @@ async def list_documents(context: ToolContext) -> str:
     if agent.collection_id is None:
         return "This agent has no knowledge base configured."
 
-    documents = await document_service.list_documents(
-        context.session, tenant_id=agent.tenant_id, collection_id=agent.collection_id
+    documents, has_more = await document_service.list_documents(
+        context.session,
+        tenant_id=agent.tenant_id,
+        collection_id=agent.collection_id,
+        limit=_MAX_LISTED_DOCUMENTS,
     )
     if not documents:
         return "The knowledge base is empty."
 
     lines = [f"- {doc.filename} ({count} sections, {doc.status.value})" for doc, count in documents]
+    if has_more:
+        # Say the list was cut rather than let the model read a truncated
+        # inventory as a complete one — the whole point of this tool is that the
+        # agent stops guessing at its own coverage.
+        lines.append(
+            f"(showing the {_MAX_LISTED_DOCUMENTS} most recent; the collection holds more)"
+        )
     return "Documents available:\n" + "\n".join(lines)
 
 

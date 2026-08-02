@@ -163,7 +163,7 @@ async def test_a_credential_goes_in_and_never_comes_back(authed_client, mcp_env)
     assert "auth_token" not in created
 
     listed = await client.get("/mcp-servers")
-    body = listed.json()[0]
+    body = listed.json()["items"][0]
     assert body["authenticated"] is True
     assert "secret-token-123" not in listed.text
 
@@ -440,7 +440,7 @@ async def test_a_disabled_server_is_visible_but_unreachable(
     # owner, not reachable by the runtime.
     assert "tools" not in seen[0]
     assert remote_server == []
-    assert (await client.get("/mcp-servers")).json()[0]["enabled"] is False
+    assert (await client.get("/mcp-servers")).json()["items"][0]["enabled"] is False
 
 
 async def test_an_agent_that_names_no_remote_tools_dials_nothing(

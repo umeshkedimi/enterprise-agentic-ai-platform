@@ -3,7 +3,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_tenant
+from app.api.deps import PageParams, get_current_tenant, page_params
 from app.core.config import get_settings
 from app.db.session import get_db_session
 from app.models.mcp import McpServer
@@ -13,6 +13,7 @@ from app.models.schemas import (
     McpServerResponse,
     McpServerUpdate,
     McpToolResponse,
+    Page,
 )
 from app.models.tenant import Tenant
 from app.services import mcp_service
@@ -92,13 +93,21 @@ async def create_mcp_server(
     return _to_response(server)
 
 
-@router.get("", response_model=list[McpServerResponse])
+@router.get("", response_model=Page[McpServerResponse])
 async def list_mcp_servers(
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
-) -> list[McpServerResponse]:
-    servers = await mcp_service.list_servers(session, tenant_id=tenant.id)
-    return [_to_response(s) for s in servers]
+    page: PageParams = Depends(page_params),
+) -> Page[McpServerResponse]:
+    servers, has_more = await mcp_service.list_servers(
+        session, tenant_id=tenant.id, limit=page.limit, offset=page.offset
+    )
+    return Page(
+        items=[_to_response(s) for s in servers],
+        limit=page.limit,
+        offset=page.offset,
+        has_more=has_more,
+    )
 
 
 @router.get("/{server_id}", response_model=McpServerResponse)

@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.logging import get_logger
 from app.models.agent import Collection
 from app.services.errors import NotFoundError, SlugAlreadyExistsError
+from app.services.pagination import DEFAULT_PAGE_LIMIT, paginate, split_page
 
 logger = get_logger(__name__)
 
@@ -32,13 +33,22 @@ async def create_collection(
     return collection
 
 
-async def list_collections(session: AsyncSession, *, tenant_id: uuid.UUID) -> list[Collection]:
-    result = await session.scalars(
+async def list_collections(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    limit: int = DEFAULT_PAGE_LIMIT,
+    offset: int = 0,
+) -> tuple[list[Collection], bool]:
+    stmt = paginate(
         select(Collection)
         .where(Collection.tenant_id == tenant_id)
-        .order_by(Collection.created_at.desc())
+        .order_by(Collection.created_at.desc()),
+        limit=limit,
+        offset=offset,
     )
-    return list(result.all())
+    result = await session.scalars(stmt)
+    return split_page(list(result.all()), limit)
 
 
 async def get_collection(

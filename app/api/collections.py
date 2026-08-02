@@ -3,9 +3,9 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_tenant
+from app.api.deps import PageParams, get_current_tenant, page_params
 from app.db.session import get_db_session
-from app.models.schemas import CollectionCreate, CollectionResponse
+from app.models.schemas import CollectionCreate, CollectionResponse, Page
 from app.models.tenant import Tenant
 from app.services import collection_service
 from app.services.errors import NotFoundError, SlugAlreadyExistsError
@@ -45,13 +45,21 @@ async def create_collection(
     return _to_response(collection)
 
 
-@router.get("", response_model=list[CollectionResponse])
+@router.get("", response_model=Page[CollectionResponse])
 async def list_collections(
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
-) -> list[CollectionResponse]:
-    collections = await collection_service.list_collections(session, tenant_id=tenant.id)
-    return [_to_response(c) for c in collections]
+    page: PageParams = Depends(page_params),
+) -> Page[CollectionResponse]:
+    collections, has_more = await collection_service.list_collections(
+        session, tenant_id=tenant.id, limit=page.limit, offset=page.offset
+    )
+    return Page(
+        items=[_to_response(c) for c in collections],
+        limit=page.limit,
+        offset=page.offset,
+        has_more=has_more,
+    )
 
 
 @router.get("/{collection_id}", response_model=CollectionResponse)

@@ -10,7 +10,7 @@ async def test_collection_crud_roundtrip(authed_client):
     assert r.status_code == 201, r.text
     coll_id = r.json()["id"]
 
-    assert (await client.get("/collections")).json()[0]["id"] == coll_id
+    assert (await client.get("/collections")).json()["items"][0]["id"] == coll_id
     assert (await client.get(f"/collections/{coll_id}")).json()["name"] == "HR Policies"
     assert (await client.delete(f"/collections/{coll_id}")).status_code == 204
     assert (await client.get(f"/collections/{coll_id}")).status_code == 404
@@ -135,7 +135,7 @@ async def test_agents_are_isolated_between_tenants(authed_client, app, admin_hea
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client_b:
         client_b.headers["Authorization"] = f"Bearer {other_key}"
-        assert (await client_b.get("/agents")).json() == []
+        assert (await client_b.get("/agents")).json()["items"] == []
 
     from tests.integration.conftest import _delete_tenant
 

@@ -61,7 +61,7 @@ async def test_list_empty_collection_is_ok(authed_client):
     ).json()["id"]
     r = await client.get(f"/collections/{coll_id}/documents")
     assert r.status_code == 200
-    assert r.json() == []
+    assert r.json()["items"] == []
 
 
 async def test_upload_over_the_size_limit_is_413(authed_client, tiny_upload_limit, fake_embeddings):
@@ -83,7 +83,7 @@ async def test_upload_over_the_size_limit_is_413(authed_client, tiny_upload_limi
 
     # Nothing was stored: a refused upload leaves no half-ingested document.
     listed = await client.get(f"/collections/{coll_id}/documents")
-    assert listed.json() == []
+    assert listed.json()["items"] == []
 
 
 async def test_upload_under_the_size_limit_still_ingests(

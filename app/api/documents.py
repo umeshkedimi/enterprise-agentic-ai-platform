@@ -3,11 +3,11 @@ import uuid
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_tenant
+from app.api.deps import PageParams, get_current_tenant, page_params
 from app.core.config import get_settings
 from app.db.session import get_db_session
 from app.models.document import Document, DocumentStatus
-from app.models.schemas import DocumentResponse
+from app.models.schemas import DocumentResponse, Page
 from app.models.tenant import Tenant
 from app.services import document_service
 from app.services.errors import NotFoundError
@@ -141,20 +141,30 @@ async def upload_document(
 
 
 @router.get(
-    "/collections/{collection_id}/documents", response_model=list[DocumentResponse]
+    "/collections/{collection_id}/documents", response_model=Page[DocumentResponse]
 )
 async def list_documents(
     collection_id: uuid.UUID,
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
-) -> list[DocumentResponse]:
+    page: PageParams = Depends(page_params),
+) -> Page[DocumentResponse]:
     try:
-        rows = await document_service.list_documents(
-            session, tenant_id=tenant.id, collection_id=collection_id
+        rows, has_more = await document_service.list_documents(
+            session,
+            tenant_id=tenant.id,
+            collection_id=collection_id,
+            limit=page.limit,
+            offset=page.offset,
         )
     except NotFoundError as exc:
         raise _COLLECTION_NOT_FOUND from exc
-    return [_to_response(doc, count) for doc, count in rows]
+    return Page(
+        items=[_to_response(doc, count) for doc, count in rows],
+        limit=page.limit,
+        offset=page.offset,
+        has_more=has_more,
+    )
 
 
 @router.delete("/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
