@@ -59,6 +59,13 @@ class Settings(BaseSettings):
     # something that changes between two turns of one conversation.
     mcp_tool_cache_ttl_seconds: int = 300
 
+    # Ceiling on a single uploaded document. Ingestion runs inside the request —
+    # extract, chunk, embed, store — so an unbounded upload is an unbounded
+    # request holding a database session and a provider connection. The number is
+    # a policy choice, not a technical limit: 25 MB is a large policy PDF and a
+    # small denial of service.
+    max_upload_bytes: int = 25 * 1024 * 1024
+
     llm_provider: Literal["openai", "azure"] = "openai"
 
     openai_api_key: str = ""

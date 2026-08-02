@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_tenant
+from app.core.config import get_settings
 from app.db.session import get_db_session
 from app.models.document import Document, DocumentStatus
 from app.models.schemas import DocumentResponse
@@ -26,6 +27,41 @@ _EXTENSION_CONTENT_TYPES = {
 _COLLECTION_NOT_FOUND = HTTPException(
     status_code=status.HTTP_404_NOT_FOUND, detail="Collection not found."
 )
+
+# How much of an upload is pulled into memory at a time while checking it
+# against the limit.
+_READ_CHUNK_BYTES = 1024 * 1024
+
+
+async def _read_within_limit(file: UploadFile, limit: int) -> bytes:
+    """Read an upload, refusing one that exceeds `limit` without buffering it whole.
+
+    Reading in chunks and stopping at the first byte over the limit means an
+    oversized upload costs a bounded amount of memory and none of the ingestion
+    work behind it — extraction, embedding, and storage all happen downstream of
+    this call.
+
+    This is a limit on what the platform will *process*, not on what it will
+    receive: Starlette's multipart parser has already spooled the body by the
+    time a handler runs, so refusing the bytes at the socket is the reverse
+    proxy's job. Both limits are worth having and neither substitutes for the
+    other.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while piece := await file.read(_READ_CHUNK_BYTES):
+        total += len(piece)
+        if total > limit:
+            raise _too_large(limit)
+        chunks.append(piece)
+    return b"".join(chunks)
+
+
+def _too_large(limit: int) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+        detail=f"File exceeds the maximum upload size of {limit // (1024 * 1024)} MB.",
+    )
 
 
 def _resolve_content_type(filename: str, declared_content_type: str | None) -> str:
@@ -70,7 +106,14 @@ async def upload_document(
     session: AsyncSession = Depends(get_db_session),
 ) -> DocumentResponse:
     content_type = _resolve_content_type(file.filename, file.content_type)
-    content = await file.read()
+
+    # The parser's own count, when it has one, refuses an oversized upload
+    # without reading it back at all. The bounded read below is the guarantee.
+    limit = get_settings().max_upload_bytes
+    if file.size is not None and file.size > limit:
+        raise _too_large(limit)
+
+    content = await _read_within_limit(file, limit)
     if not content:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty."
