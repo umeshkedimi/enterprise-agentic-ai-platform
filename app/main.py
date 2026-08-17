@@ -20,6 +20,7 @@ from app.core import metrics as metrics_registry
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging, get_logger
 from app.core.middleware import RequestContextMiddleware
+from app.core.redis import start_redis, stop_redis
 from app.core.tracing import configure_tracing, instrument_app, shutdown_tracing
 from app.db.session import engine
 
@@ -39,7 +40,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     The graph's checkpointer is started here for the same reason and with the
     same discipline: it owns a connection pool, so it must not be opened by
-    importing a module, and it must be closed on the way out.
+    importing a module, and it must be closed on the way out. Redis is the same
+    shape for a lower stake — a client opened by import would pool connections
+    nothing asked for, and one left open on shutdown leaks across a rolling
+    deploy the same way an undisposed engine does.
     """
     settings = get_settings()
     # Tracing before logging, so the processor that stamps trace ids onto log
@@ -48,10 +52,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     configure_logging(settings.log_level)
     metrics_registry.set_build_info(settings.app_version, settings.app_env)
     await start_checkpointer(settings)
+    await start_redis(settings)
     logger.info("application_startup", app_env=settings.app_env)
 
     yield
 
+    await stop_redis()
     await stop_checkpointer()
     await engine.dispose()
     # Last, and after the engine: the spans describing shutdown are worth

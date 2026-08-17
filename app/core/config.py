@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     database_url_sync: str = "postgresql+psycopg://eaap:eaap@localhost:5432/eaap"
 
     redis_url: str = "redis://localhost:6379/0"
+    # Deliberately short: Redis backs the MCP discovery cache, which sits on the
+    # request path of every tool-enabled model call. A hung connection here must
+    # fail fast into the cache-miss path (a live discovery) rather than add its
+    # own timeout on top of the server's.
+    redis_socket_timeout: float = 2.0
 
     # Gates tenant provisioning (creating tenants, minting API keys) — a
     # privileged control-plane operation, distinct from a tenant using the

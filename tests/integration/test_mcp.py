@@ -30,11 +30,11 @@ FERNET_KEY = "0S0Vd6vzTHqPq7pEbFqoCH8pXjZ1yqNFYyoxRy_gN2E="
 
 
 @pytest.fixture(autouse=True)
-def clear_tool_cache():
+async def clear_tool_cache():
     """Discovery is cached per server; tests must not inherit each other's."""
-    mcp_tools.clear_cache()
+    await mcp_tools.clear_cache()
     yield
-    mcp_tools.clear_cache()
+    await mcp_tools.clear_cache()
 
 
 @pytest.fixture
@@ -510,3 +510,35 @@ async def test_editing_a_server_invalidates_what_was_discovered_under_it(
     # cannot serve tools discovered under the old configuration — and nothing has
     # to remember to clear it.
     assert remote_server.count("weather") == 2
+
+
+async def test_a_discovery_is_readable_straight_out_of_redis(
+    authed_client, mcp_env, remote_server
+):
+    """The entry lives in the shared cache, not in this process's memory.
+
+    Reading the key back with a second, independently-constructed client is the
+    difference a multi-replica deployment cares about: an in-process dict would
+    pass every other test in this file identically, and only disappear the
+    moment a second pod asked.
+    """
+    from app.core.redis import get_redis_client
+
+    client, tenant_id = authed_client
+    created = await register_server(client)
+    server_id = uuid.UUID(created["id"])
+
+    async with async_session_factory() as session:
+        server = await mcp_service.get_server(
+            session, tenant_id=tenant_id, server_id=server_id
+        )
+        await mcp_tools.discover(server, settings=get_settings())
+
+        redis_client = get_redis_client(get_settings())
+        key = mcp_tools._cache_key(server)
+        raw = await redis_client.get(key)
+        assert raw is not None
+        assert "weather__forecast" in raw
+
+        ttl = await redis_client.ttl(key)
+        assert 0 < ttl <= get_settings().mcp_tool_cache_ttl_seconds

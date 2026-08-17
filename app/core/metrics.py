@@ -230,8 +230,10 @@ TOOL_DURATION = Histogram(
 
 # Discovery is on the critical path of every model call in a turn, so its
 # latency and its cache hit rate are the two numbers that decide whether the
-# in-process TTL cache is doing its job — and whether the deferred connection
-# pool is worth building.
+# Redis-backed cache is doing its job — and whether the deferred connection
+# pool is worth building. `outcome` is one of `cache_hit`, `ok`, `blocked`,
+# `error` (the discovery itself), or `cache_error` (Redis was unreachable, so
+# the call fell through to a live discovery instead of serving a cache hit).
 MCP_DISCOVERY = Counter(
     "eaap_mcp_discovery_total",
     "Tool-list lookups against a tenant's MCP server, by outcome.",

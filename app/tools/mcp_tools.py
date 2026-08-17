@@ -18,6 +18,7 @@ here:
   the agent runs with the tools it could reach.
 """
 
+import json
 import re
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -29,9 +30,10 @@ from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 
 from app.core import metrics, tracing
-from app.core.config import Settings
+from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
 from app.core.net import UnsafeUrlError, validate_outbound_url
+from app.core.redis import get_redis_client
 from app.models.mcp import NAME_SEPARATOR, McpServer
 from app.services import mcp_service
 from app.tools.registry import Tool, ToolContext
@@ -187,18 +189,74 @@ def _make_handler(server: McpServer, remote_name: str, settings: Settings):
 
 
 # Discovery is a round trip per server per model call, and a tool loop makes
-# several model calls per turn. The cache key includes `updated_at` so editing a
-# server's URL or rotating its credential invalidates what was discovered under
-# the old configuration, without anything having to remember to clear it.
-_CACHE: dict[tuple[str, str], tuple[float, Discovery]] = {}
+# several model calls per turn. Redis rather than an in-process dict for the
+# reason the in-process version was always flagged as wrong: a platform with
+# more than one replica would otherwise dial every server once per pod instead
+# of once per TTL, and the ratio only gets worse as replicas scale up. A cache
+# key already keyed by `updated_at` was the change that made this cheap — the
+# invalidation story (editing a server's URL or rotating its credential) needed
+# no rework, only a different place to look the key up.
+_CACHE_PREFIX = "mcp:discovery:"
 
 
-def clear_cache() -> None:
-    _CACHE.clear()
+def _cache_key(server: McpServer) -> str:
+    return f"{_CACHE_PREFIX}{server.id}:{server.updated_at.isoformat()}"
 
 
-def _cache_key(server: McpServer) -> tuple[str, str]:
-    return (str(server.id), server.updated_at.isoformat())
+def _dump(discovery: Discovery) -> str:
+    """The JSON-safe half of a `Discovery` — everything except the handlers.
+
+    A `Tool.handler` is a closure over this process's `httpx2` client and this
+    server row; it cannot cross a wire to another replica and would be the
+    wrong thing to share even if it could — the *server* row it is applied to
+    should always be this call's, not whichever replica happened to discover
+    first. What is shareable, and is the entire cost of discovery, is the tool
+    list itself: names, descriptions, schemas.
+    """
+    return json.dumps(
+        {
+            "tools": [
+                {"name": t.name, "description": t.description, "parameters": t.parameters}
+                for t in discovery.tools
+            ],
+            "error": discovery.error,
+        }
+    )
+
+
+def _load(server: McpServer, settings: Settings, raw: str) -> Discovery:
+    """Rebuild live `Tool` objects — with this process's handlers — from cached JSON.
+
+    `remote_name` is not stored: it is recovered by stripping the namespace
+    prefix `_namespaced` applied when the entry was written, which is safe
+    because that prefix is deterministic and the cache key already changes
+    whenever `server.slug` does.
+    """
+    data = json.loads(raw)
+    prefix = f"{server.slug}{NAME_SEPARATOR}"
+    tools = [
+        Tool(
+            name=t["name"],
+            description=t["description"],
+            parameters=t["parameters"],
+            handler=_make_handler(server, t["name"].removeprefix(prefix), settings),
+            remote=True,
+        )
+        for t in data["tools"]
+    ]
+    return Discovery(tools=tools, error=data.get("error"))
+
+
+async def clear_cache(*, settings: Settings | None = None) -> None:
+    """Test-only reset. Production invalidation is the `updated_at` key, not this."""
+    settings = settings or get_settings()
+    client = get_redis_client(settings)
+    try:
+        keys = [key async for key in client.scan_iter(match=f"{_CACHE_PREFIX}*")]
+        if keys:
+            await client.delete(*keys)
+    except Exception as exc:  # noqa: BLE001 - connection errors are many types
+        logger.warning("mcp_cache_clear_failed", error=type(exc).__name__)
 
 
 async def discover(
@@ -206,22 +264,30 @@ async def discover(
 ) -> Discovery:
     """List a server's tools as platform `Tool` objects.
 
-    Never raises. A server that is unreachable, misconfigured, or blocked comes
-    back as a `Discovery` carrying the reason — because the caller is assembling
-    the tools for a turn that should still happen, and an exception here would
-    turn one team's broken integration into a failed chat request.
+    Never raises — not on a broken server, and not on a broken cache. A server
+    that is unreachable, misconfigured, or blocked comes back as a `Discovery`
+    carrying the reason; a Redis command that fails is treated as a cache miss
+    and falls through to a live discovery, because the caller is assembling the
+    tools for a turn that should still happen either way.
     """
     key = _cache_key(server)
+    client = get_redis_client(settings)
+
     if use_cache:
-        cached = _CACHE.get(key)
-        if cached and cached[0] > monotonic():
+        try:
+            cached = await client.get(key)
+        except Exception as exc:  # noqa: BLE001 - connection errors are many types
+            cached = None
+            metrics.MCP_DISCOVERY.labels("cache_error").inc()
+            logger.warning("mcp_cache_read_failed", error=type(exc).__name__)
+        if cached is not None:
             # Counted, and deliberately kept out of the duration histogram: a
             # cache hit is not a fast discovery, it is the absence of one, and
             # mixing the two would report a latency that no server ever served.
             # The ratio of this counter to the rest is what says whether the TTL
             # is earning its keep.
             metrics.MCP_DISCOVERY.labels("cache_hit").inc()
-            return cached[1]
+            return _load(server, settings, cached)
 
     started = monotonic()
     # Named on the span, not on the metric: a server slug is a tenant's own
@@ -236,7 +302,10 @@ async def discover(
     # otherwise be dialled on every model call of every turn, adding its timeout
     # to each one — an outage on one integration becoming a latency problem for
     # every agent in the tenant.
-    _CACHE[key] = (monotonic() + settings.mcp_tool_cache_ttl_seconds, discovery)
+    try:
+        await client.set(key, _dump(discovery), ex=settings.mcp_tool_cache_ttl_seconds)
+    except Exception as exc:  # noqa: BLE001 - connection errors are many types
+        logger.warning("mcp_cache_write_failed", error=type(exc).__name__)
     return discovery
 
 

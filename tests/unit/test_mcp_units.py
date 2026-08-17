@@ -115,6 +115,43 @@ def test_a_long_description_is_capped():
     assert len(tools[0].description) == mcp_tools.MAX_DESCRIPTION_CHARS
 
 
+# --- cache serialization -----------------------------------------------------
+
+
+def test_a_discovered_tool_round_trips_through_the_cache_encoding():
+    """What gets written to Redis and read back must rebuild a working tool.
+
+    The handler cannot itself survive the round trip — it closes over this
+    process's HTTP client — so `remote_name` has to be recovered from the
+    namespaced name instead. This is the test that would catch getting that
+    prefix strip wrong.
+    """
+    server = make_server()
+    schema = {"type": "object", "properties": {"city": {"type": "string"}}}
+    original = mcp_tools._to_tools(server, [remote("forecast", "d", schema)], SETTINGS)
+    discovery = mcp_tools.Discovery(tools=original)
+
+    loaded = mcp_tools._load(server, SETTINGS, mcp_tools._dump(discovery))
+
+    assert [t.name for t in loaded.tools] == ["weather__forecast"]
+    assert loaded.tools[0].description == "d"
+    assert loaded.tools[0].parameters == schema
+    assert loaded.tools[0].remote is True
+    # A freshly built handler, not the original closure — serializing that was
+    # never the point — but bound to the same remote tool name, which is what
+    # this test would fail to catch if the prefix strip above were wrong.
+    assert loaded.tools[0].handler is not original[0].handler
+
+
+def test_a_cached_failure_round_trips_with_no_tools():
+    loaded = mcp_tools._load(
+        make_server(), SETTINGS, mcp_tools._dump(mcp_tools.Discovery(error="ETIMEDOUT"))
+    )
+
+    assert loaded.tools == []
+    assert loaded.error == "ETIMEDOUT"
+
+
 # --- result rendering ------------------------------------------------------
 
 
