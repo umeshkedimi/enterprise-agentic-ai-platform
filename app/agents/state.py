@@ -42,6 +42,12 @@ class OrchestrationContext:
     # watched, and a conversation resumed tomorrow from a checkpoint has no
     # bearing on whether somebody was streaming it yesterday.
     stream: bool = False
+    # A fold-in of the conversation's turns older than the replay window, read
+    # fresh from the `Conversation` row for this invocation. Context rather than
+    # state for the same reason the agent row is: it is read-only per turn, and a
+    # resumed tool loop should see whatever the transcript's summary currently
+    # says, not a copy frozen when the loop started.
+    conversation_summary: str | None = None
 
 
 class AgentState(TypedDict, total=False):

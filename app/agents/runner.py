@@ -139,6 +139,7 @@ async def run_turn(
     session: AsyncSession,
     conversation_id: uuid.UUID | None = None,
     settings: Settings | None = None,
+    conversation_summary: str | None = None,
 ) -> AgentTurnResult:
     """Run one question through the orchestration graph under `agent`'s config.
 
@@ -153,7 +154,12 @@ async def run_turn(
         # its way to being refused.
         raise AgentDisabledError(str(agent.id))
 
-    context = OrchestrationContext(agent=agent, session=session, settings=settings)
+    context = OrchestrationContext(
+        agent=agent,
+        session=session,
+        settings=settings,
+        conversation_summary=conversation_summary,
+    )
 
     started = time.perf_counter()
     # Still no blanket try/except that *handles* anything. Every failure the
@@ -219,6 +225,7 @@ async def stream_turn(
     session: AsyncSession,
     conversation_id: uuid.UUID | None = None,
     settings: Settings | None = None,
+    conversation_summary: str | None = None,
 ) -> AsyncIterator[AgentStreamEvent]:
     """Run a turn, yielding fragments as they arrive and the result at the end.
 
@@ -234,7 +241,11 @@ async def stream_turn(
         raise AgentDisabledError(str(agent.id))
 
     context = OrchestrationContext(
-        agent=agent, session=session, settings=settings, stream=True
+        agent=agent,
+        session=session,
+        settings=settings,
+        stream=True,
+        conversation_summary=conversation_summary,
     )
 
     final: dict = {}

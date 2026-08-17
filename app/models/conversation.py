@@ -64,6 +64,18 @@ class Conversation(SQLModel, table=True):
         sa_column=Column(ForeignKey("agents.id", ondelete="CASCADE"), nullable=False, index=True)
     )
     title: str | None = Field(default=None, sa_column=Column(String(255), nullable=True))
+    # A rolling fold-in of everything older than the replay window, refreshed
+    # lazily the first time a thread outgrows it. Nullable rather than
+    # empty-string: most conversations never reach the window and should read as
+    # having no summary, not an empty one.
+    summary: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    # The `seq` of the newest message already folded in. Everything at or below
+    # this watermark is represented only in `summary`; everything above it is
+    # still replayed verbatim by `load_history`. Null means nothing has been
+    # summarized yet — the thread has never exceeded the window.
+    summary_through_seq: int | None = Field(
+        default=None, sa_column=Column(BigInteger, nullable=True)
+    )
     created_at: datetime = Field(
         default_factory=_utcnow, sa_column=Column(DateTime(timezone=True), nullable=False)
     )

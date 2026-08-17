@@ -190,6 +190,37 @@ async def test_history_precedes_the_grounded_question(captured, searched, settin
     assert captured[0]["messages"][1]["content"] == "How much leave?"
 
 
+async def test_conversation_summary_precedes_sources_in_the_user_turn(
+    captured, searched, settings
+):
+    _, result = searched
+    result.append(make_chunk())
+
+    await run_turn(
+        agent=make_agent(),
+        question="And for part-timers?",
+        conversation_summary="Earlier, the user asked about full-time leave.",
+        session=None,
+        settings=settings,
+    )
+
+    user = captured[0]["messages"][-1]["content"]
+    assert "<conversation_summary>" in user
+    assert user.index("<conversation_summary>") < user.index("<sources>")
+    assert "Earlier, the user asked about full-time leave." in user
+
+
+async def test_no_summary_block_when_there_is_nothing_to_summarize(
+    captured, searched, settings
+):
+    await run_turn(
+        agent=make_agent(collection_id=None), question="Hello", session=None, settings=settings
+    )
+
+    user = captured[0]["messages"][-1]["content"]
+    assert "<conversation_summary>" not in user
+
+
 async def test_disabled_agent_refuses_before_spending_a_retrieval_call(
     captured, searched, settings
 ):

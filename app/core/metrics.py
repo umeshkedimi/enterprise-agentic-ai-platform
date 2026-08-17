@@ -147,14 +147,19 @@ LLM_TOKENS = Counter(
     registry=REGISTRY,
 )
 
-# The two things the platform calls a model for. Both are platform constants —
-# nobody outside chooses between them — and separating them is not bookkeeping:
-# the evaluation judge issues long, cheap, unhurried calls that nobody is waiting
-# on, and folding them into the same series as the serving path would move the
-# p95 an operator pages on without a single served turn getting slower. Enabling
-# evaluation would look like a latency regression.
+# The three things the platform calls a model for. All three are platform
+# constants — nobody outside chooses between them — and separating them is not
+# bookkeeping: the evaluation judge issues long, cheap, unhurried calls that
+# nobody is waiting on, and folding them into the same series as the serving
+# path would move the p95 an operator pages on without a single served turn
+# getting slower. Summarization sits on the request path (it runs before
+# `generate` on the turn that crosses the history window) but is still its own
+# workload, because it is not the model call the caller is waiting to read —
+# conflating the two would report a turn's answer as slower than the answer
+# itself took.
 WORKLOAD_SERVING = "serving"
 WORKLOAD_EVALUATION = "evaluation"
+WORKLOAD_SUMMARIZATION = "summarization"
 
 # --- Retrieval --------------------------------------------------------------
 

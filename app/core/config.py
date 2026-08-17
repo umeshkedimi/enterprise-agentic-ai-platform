@@ -89,6 +89,10 @@ class Settings(BaseSettings):
     # every turn and the API serves all of it.
     history_window: int = 20
     history_ttl_seconds: int = 86400
+    # Ceiling on the stored rolling summary. A defensive bound on model output,
+    # not a rubric rule the model is told about — the summarization prompt asks
+    # it to compress, but nothing stops a bad response from growing instead.
+    conversation_summary_max_chars: int = 4000
 
     # The graph checkpointer's own connection pool. Separate from the SQLAlchemy
     # engine because LangGraph's saver speaks psycopg directly, so the two cannot

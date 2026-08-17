@@ -260,3 +260,57 @@ def test_conversation_id_without_a_thread_is_not_persisted():
     assert _thread_config(None) == {}
     cid = uuid.uuid4()
     assert _thread_config(cid) == {"configurable": {"thread_id": str(cid)}}
+
+
+async def test_a_window_overflow_folds_older_turns_into_a_summary(
+    authed_client, fake_embeddings, provider_creds, monkeypatch
+):
+    """The rolling-summary upgrade to history, pinned end-to-end.
+
+    A window of 4 is crossed on the fourth turn: turns one through three have
+    left six raw messages on the transcript, one turn's worth (the first two)
+    folds into a summary, and that turn's own generate call is the one that
+    should carry it — not the raw window, which still replays only what fits.
+    """
+    monkeypatch.setenv("HISTORY_WINDOW", "4")
+    get_settings.cache_clear()
+
+    client, _ = authed_client
+    agent_id = await create_agent(client, slug="chatty", collection_id=None)
+
+    calls: list[dict] = []
+
+    async def fake(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            model=kwargs["model"],
+            choices=[SimpleNamespace(message=SimpleNamespace(content="Twenty-five days [1]."))],
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+        )
+
+    monkeypatch.setattr(litellm, "acompletion", fake)
+
+    conversation_id = None
+    for i in range(4):
+        body: dict = {"message": f"question {i}"}
+        if conversation_id:
+            body["conversation_id"] = conversation_id
+        r = await client.post(f"/agents/{agent_id}/chat", json=body)
+        assert r.status_code == 200, r.text
+        conversation_id = r.json()["conversation_id"]
+
+    get_settings.cache_clear()
+
+    # Three plain turns, then a fourth that pays for one summarization call
+    # ahead of its own generate call.
+    assert len(calls) == 5
+
+    summary_call = calls[3]
+    assert "Summarize the conversation so far" in summary_call["messages"][0]["content"]
+    summary_request = summary_call["messages"][-1]["content"]
+    assert "<conversation>" in summary_request
+    assert "question 0" in summary_request
+    assert "<summary_so_far>" not in summary_request
+
+    generate_call = calls[4]
+    assert "<conversation_summary>" in generate_call["messages"][-1]["content"]

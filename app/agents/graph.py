@@ -183,7 +183,12 @@ async def generate_node(state: AgentState, runtime: Runtime[OrchestrationContext
 
         turns = [
             *state.get("history", []),
-            Turn(role="user", content=build_grounded_question(state["question"], chunks)),
+            Turn(
+                role="user",
+                content=build_grounded_question(
+                    state["question"], chunks, runtime.context.conversation_summary
+                ),
+            ),
         ]
 
         completion = await complete(

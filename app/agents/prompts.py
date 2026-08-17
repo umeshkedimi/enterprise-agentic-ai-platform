@@ -50,13 +50,24 @@ def format_sources(chunks: Sequence[RetrievedChunk]) -> str:
     return "<sources>\n" + "\n\n".join(blocks) + "\n</sources>"
 
 
-def build_grounded_question(question: str, chunks: Sequence[RetrievedChunk]) -> str:
-    """Combine evidence and question into the single user turn the model sees.
+def build_grounded_question(
+    question: str, chunks: Sequence[RetrievedChunk], summary: str | None = None
+) -> str:
+    """Combine evidence, prior context, and question into the single user turn.
 
-    Sources come first: with the evidence already in front of it, the model reads
-    the question knowing what it has to work with, which measurably reduces the
-    urge to answer from memory.
+    `summary` is a platform-generated fold-in of the turns that have already
+    aged out of the replay window (see `conversation_service.load_turn_context`).
+    It goes here, in the user turn, for the same reason sources do: it is built
+    from conversation content — which can itself contain quoted document text
+    from an earlier retrieval — so it is data the model reads, not an elevated
+    instruction. Rendered before sources, the same order the platform's own
+    history rejoins the request in.
     """
-    if not chunks:
+    parts = []
+    if summary:
+        parts.append(f"<conversation_summary>\n{summary}\n</conversation_summary>")
+    if chunks:
+        parts.append(format_sources(chunks))
+    if not parts:
         return question
-    return f"{format_sources(chunks)}\n\n<question>\n{question}\n</question>"
+    return "\n\n".join([*parts, f"<question>\n{question}\n</question>"])

@@ -358,8 +358,8 @@ async def chat(
         raise _CONVERSATION_NOT_FOUND from exc
 
     settings = get_settings()
-    history = await conversation_service.load_history(
-        session, conversation_id=conversation.id, limit=settings.history_window
+    history, conversation_summary = await conversation_service.load_turn_context(
+        session, conversation=conversation, agent=agent, settings=settings
     )
 
     try:
@@ -370,6 +370,7 @@ async def chat(
             session=session,
             conversation_id=conversation.id,
             settings=settings,
+            conversation_summary=conversation_summary,
         )
     except DomainError as exc:
         # Nothing is recorded on a failed turn. A question with no answer would
@@ -478,8 +479,8 @@ async def _stream_turn(
             yield sse.frame("error", {"status": 404, "detail": "Agent not found."})
             return
 
-        history = await conversation_service.load_history(
-            session, conversation_id=conversation.id, limit=settings.history_window
+        history, conversation_summary = await conversation_service.load_turn_context(
+            session, conversation=conversation, agent=agent, settings=settings
         )
 
         result = None
@@ -491,6 +492,7 @@ async def _stream_turn(
                 session=session,
                 conversation_id=conversation.id,
                 settings=settings,
+                conversation_summary=conversation_summary,
             ):
                 if isinstance(event, runner.TokenChunk):
                     yield sse.frame("token", {"text": event.text})
