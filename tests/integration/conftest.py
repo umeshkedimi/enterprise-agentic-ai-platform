@@ -140,13 +140,14 @@ async def create_collection(client, slug: str) -> str:
     return r.json()["id"]
 
 
-async def upload_document(client, collection_id: str, filename: str, body: bytes) -> None:
+async def upload_document(client, collection_id: str, filename: str, body: bytes) -> str:
     r = await client.post(
         f"/collections/{collection_id}/documents",
         files={"file": (filename, io.BytesIO(body), "text/plain")},
     )
     assert r.status_code == 201, r.text
     assert r.json()["status"] == "ready", r.text
+    return r.json()["id"]
 
 
 async def create_agent(client, *, slug: str, collection_id: str | None, **overrides) -> str:

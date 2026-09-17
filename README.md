@@ -544,6 +544,11 @@ stays a plain array.
 | POST | `/collections/{id}/documents` | tenant | Upload a pdf/txt/markdown document (413 above `MAX_UPLOAD_BYTES`) |
 | GET | `/collections/{id}/documents` | tenant | List documents with chunk counts (paged) |
 | DELETE | `/documents/{id}` | tenant | Delete a document and its chunks |
+| POST | `/collections/{id}/golden-examples` | tenant | Record a query and the documents that ought to answer it |
+| GET | `/collections/{id}/golden-examples` | tenant | List a collection's golden examples (paged) |
+| DELETE | `/golden-examples/{id}` | tenant | Remove a golden example |
+| POST | `/collections/{id}/retrieval-benchmark` | tenant | Score live retrieval against every golden example on file |
+| GET | `/collections/{id}/retrieval-benchmark` | tenant | Past benchmark runs, most recent first (paged) |
 
 Request/response contracts: `app/models/schemas.py`.
 

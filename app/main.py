@@ -14,6 +14,7 @@ from app.api import (
     health,
     mcp_servers,
     metrics,
+    retrieval_eval,
     tenants,
 )
 from app.core import metrics as metrics_registry
@@ -105,6 +106,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(documents.router)
     app.include_router(mcp_servers.router)
     app.include_router(evaluations.router)
+    app.include_router(retrieval_eval.router)
 
     _register_exception_handlers(app)
 

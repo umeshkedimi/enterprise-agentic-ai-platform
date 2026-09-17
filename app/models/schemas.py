@@ -395,3 +395,62 @@ class AgentChatResponse(BaseModel):
     # End-to-end for the turn, so it exceeds the model latency by the cost of
     # retrieval. Keeping both is what makes a slow answer diagnosable.
     latency_ms: int
+
+
+class GoldenExampleCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(min_length=1, max_length=2000)
+    relevant_document_ids: list[uuid.UUID] = Field(min_length=1)
+    notes: str | None = Field(default=None, max_length=2000)
+
+
+class GoldenExampleResponse(BaseModel):
+    id: uuid.UUID
+    collection_id: uuid.UUID
+    query: str
+    relevant_document_ids: list[uuid.UUID]
+    notes: str | None
+    created_at: datetime
+
+
+class RunBenchmarkRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Required, not defaulted — naming what changed is the point; see
+    # `RetrievalBenchmarkRun.label` in app/models/retrieval_eval.py.
+    label: str = Field(min_length=1, max_length=120)
+    # Same default as `Agent.retrieval_top_k` — a benchmark run should reflect
+    # what agents actually retrieve with unless told otherwise.
+    top_k: int = Field(default=DEFAULT_RETRIEVAL_TOP_K, ge=1, le=50)
+
+
+class RetrievalBenchmarkCaseResult(BaseModel):
+    golden_example_id: uuid.UUID
+    query: str
+    relevant_document_ids: list[uuid.UUID]
+    # Ranked, may repeat a document across chunks — kept raw for debuggability
+    # rather than deduplicated away.
+    retrieved_document_ids: list[uuid.UUID]
+    recall: float
+    reciprocal_rank: float
+
+
+class RetrievalBenchmarkRunResponse(BaseModel):
+    """One scored pass over a collection's golden examples.
+
+    `mean_recall` and `mrr` are arithmetic over `results`, not a number a model
+    produced — the same discipline `TurnEvaluationResponse.score` follows, and
+    for the same reason: a reader who distrusts 0.71 can see exactly which case
+    dragged it down.
+    """
+
+    id: uuid.UUID
+    collection_id: uuid.UUID
+    label: str
+    top_k: int
+    cases: int
+    mean_recall: float
+    mrr: float
+    results: list[RetrievalBenchmarkCaseResult]
+    created_at: datetime

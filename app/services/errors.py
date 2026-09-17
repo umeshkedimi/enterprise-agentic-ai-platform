@@ -87,6 +87,17 @@ class EvaluationFailedError(DomainError):
     """
 
 
+class NoGoldenExamplesError(DomainError):
+    """A benchmark was requested for a collection with no golden examples (→ 409).
+
+    A run with zero cases would still produce a row with a `mean_recall` and an
+    `mrr` — numbers that look exactly as legitimate as a real run's, chartable
+    right alongside them, and meaning nothing. Refused for the same reason the
+    groundedness judge refuses to fabricate a score: a fabricated reading in an
+    audit trail is worse than a gap.
+    """
+
+
 class RetrievalError(DomainError):
     """Evidence could not be gathered for a grounded answer (→ 502).
 
