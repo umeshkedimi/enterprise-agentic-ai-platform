@@ -60,6 +60,13 @@ async def semantic_search(
                 .where(
                     Document.collection_id == collection_id,
                     Document.status == DocumentStatus.READY,
+                    # A superseded version's chunks stay in the table for audit
+                    # (see app/models/document.py) but must never compete for a
+                    # search result — a re-uploaded policy is not "one more
+                    # source", it is the only source, and the whole point of
+                    # versioning is that the old text stops being retrievable
+                    # the moment a new version supersedes it.
+                    Document.is_current.is_(True),
                 )
                 .order_by(distance)
                 .limit(top_k)

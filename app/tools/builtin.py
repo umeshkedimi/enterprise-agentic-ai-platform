@@ -85,11 +85,20 @@ async def list_documents(context: ToolContext) -> str:
         tenant_id=agent.tenant_id,
         collection_id=agent.collection_id,
         limit=_MAX_LISTED_DOCUMENTS,
+        # A superseded version is not part of what the agent currently knows —
+        # listing both it and its replacement would describe one policy as two.
+        current_only=True,
     )
     if not documents:
         return "The knowledge base is empty."
 
-    lines = [f"- {doc.filename} ({count} sections, {doc.status.value})" for doc, count in documents]
+    # `doc.status` here, not `.value`: this row was just loaded fresh from the
+    # database in this same call, and a `Document` hydrated by a SELECT holds
+    # the column's raw str, not a `DocumentStatus` instance — the attribute
+    # only becomes the enum type when a Document is constructed in Python.
+    # `DocumentStatus` is a StrEnum either way, so f-string formatting gives
+    # the same text for both; `.value` does not exist on the plain str case.
+    lines = [f"- {doc.filename} ({count} sections, {doc.status})" for doc, count in documents]
     if has_more:
         # Say the list was cut rather than let the model read a truncated
         # inventory as a complete one — the whole point of this tool is that the

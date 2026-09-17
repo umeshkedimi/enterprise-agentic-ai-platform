@@ -623,6 +623,12 @@ Request/response contracts: `app/models/schemas.py`.
   string rather than an elevated directive.
 - **A failed retrieval fails the turn.** Answering anyway would quietly downgrade a grounded
   assistant to an ungrounded one at the moment nobody is watching.
+- **A re-upload supersedes, it doesn't sit beside.** Uploading under the same `document_key`
+  retires the previous version the moment the new one reaches `READY` — never earlier, so a bad
+  re-upload (a corrupt file) fails without taking the working version off retrieval, and never by
+  deleting, so an answer given under the old version can still be audited against exactly what it
+  cited. A partial unique index enforces "at most one current version per key" in Postgres itself,
+  not only in application code.
 - **Graph state is what gets persisted; context is what does not.** Live handles — session,
   settings, the agent row — travel in per-invocation context, so a checkpointed turn cannot
   resurrect a dead connection, and a resumed conversation reads the agent's current configuration

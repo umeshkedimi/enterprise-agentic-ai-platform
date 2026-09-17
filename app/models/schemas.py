@@ -68,6 +68,12 @@ class DocumentResponse(BaseModel):
     chunk_count: int
     uploaded_at: datetime
     error_message: str | None = None
+    # Null for a document never given a version identity — it has no history
+    # and is simply its own permanent current version.
+    document_key: str | None = None
+    # False marks a superseded version: still listed (this endpoint shows the
+    # full history, unlike the `list_documents` tool), never retrieved from.
+    is_current: bool = True
 
 
 class Citation(BaseModel):

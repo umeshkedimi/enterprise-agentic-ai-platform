@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import PageParams, get_current_tenant, page_params
@@ -91,6 +91,8 @@ def _to_response(document: Document, chunk_count: int) -> DocumentResponse:
         chunk_count=chunk_count,
         uploaded_at=document.uploaded_at,
         error_message=document.error_message,
+        document_key=document.document_key,
+        is_current=document.is_current,
     )
 
 
@@ -102,6 +104,11 @@ def _to_response(document: Document, chunk_count: int) -> DocumentResponse:
 async def upload_document(
     collection_id: uuid.UUID,
     file: UploadFile = File(...),
+    # Optional: groups this upload with earlier ones sharing the same key so it
+    # supersedes them on success rather than sitting beside them. Omitted, an
+    # upload behaves exactly as it always has — a standalone document with no
+    # version history.
+    document_key: str | None = Form(default=None, max_length=255),
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
 ) -> DocumentResponse:
@@ -127,6 +134,7 @@ async def upload_document(
             filename=file.filename,
             content_type=content_type,
             content=content,
+            document_key=document_key,
         )
     except NotFoundError as exc:
         raise _COLLECTION_NOT_FOUND from exc
