@@ -77,7 +77,7 @@ def searched(monkeypatch):
     calls: list[dict] = []
     result: list[RetrievedChunk] = []
 
-    async def fake_search(session, query, *, collection_id, top_k):
+    async def fake_search(session, query, *, collection_id, top_k, settings=None):
         calls.append({"query": query, "collection_id": collection_id, "top_k": top_k})
         return list(result)
 

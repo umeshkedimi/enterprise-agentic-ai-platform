@@ -179,21 +179,37 @@ RETRIEVAL_DURATION = Histogram(
 
 RETRIEVAL_CHUNKS = Histogram(
     "eaap_retrieval_chunks",
-    "How many chunks a search returned. Zero means the agent answered ungrounded.",
+    "How many chunks a search returned *after* the relevance floor, if one is "
+    "configured. Zero means the agent answered ungrounded — including a search "
+    "that found matches too weak to clear the floor.",
     buckets=(0, 1, 2, 3, 4, 5, 8, 10, 20),
     registry=REGISTRY,
 )
 
-# The instrument that exists to settle an open question rather than to raise an
-# alert. Retrieval has no relevance floor, because a badly-chosen cosine
-# threshold silently breaks retrieval and the right value is embedding-model
-# dependent — so the decision was deferred until it could be measured instead of
-# guessed. This is the measurement: the distribution of best-match scores across
-# real traffic, bucketed densely exactly where a floor would plausibly sit.
+# The instrument that turned an open question into a decidable one, and keeps
+# doing that job even after the decision is made. Retrieval had no relevance
+# floor for two chunks because a badly-chosen cosine threshold silently breaks
+# retrieval and the right value is embedding-model and corpus dependent — this
+# is the measurement that made a floor choosable instead of guessed. It always
+# records the *raw* best-match score, before any floor filters the result, on
+# purpose: once a floor is set, this is the only signal left for telling whether
+# it should move. A histogram that only ever saw what already cleared the floor
+# could never say so.
 RETRIEVAL_TOP_SCORE = Histogram(
     "eaap_retrieval_top_score",
-    "Cosine similarity of the best match, when a search returned anything.",
+    "Cosine similarity of the best match, when a search returned anything. "
+    "Recorded before any relevance floor is applied.",
     buckets=(0.0, 0.2, 0.3, 0.4, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 1.0),
+    registry=REGISTRY,
+)
+
+# How often a configured floor is the reason a search came back empty — not a
+# search that found nothing, one that found something and discarded it. No
+# labels needed: this only exists at all once an operator has set exactly one
+# floor for the whole platform, so there is nothing for a label to distinguish.
+RETRIEVAL_FLOOR_ABSTENTIONS = Counter(
+    "eaap_retrieval_floor_abstentions_total",
+    "Searches where every chunk found scored below the configured relevance floor.",
     registry=REGISTRY,
 )
 

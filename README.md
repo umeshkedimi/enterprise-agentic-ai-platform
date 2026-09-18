@@ -82,7 +82,9 @@ anything not built is under the explicitly-marked backlog below.
   rather than as a perfect one, so a retriever that finds nothing cannot report flawless grounding.
   A calibration report then buckets retrieval scores against judged groundedness and will propose a
   relevance floor — including what that floor would cost in abstentions — but declines to propose
-  one at all until there is enough data to mean it.
+  one at all until there is enough data to mean it. `retrieval_relevance_floor` applies that reading:
+  unset by default, and when an operator sets it, retrieval stops treating a match too weak to trust
+  as evidence — the same "documents don't cover this" path an empty search already used.
 - FastAPI application — app factory, lifespan-managed resources, request correlation IDs,
   structured JSON logging, liveness/readiness probes.
 - Postgres + pgvector and Redis via Docker Compose, with Prometheus, Grafana, and Jaeger behind an
@@ -687,6 +689,12 @@ Request/response contracts: `app/models/schemas.py`.
 - **A calibration report declines to recommend a floor from thin data.** The relevance-floor decision
   was deferred precisely to stop it being a guess, and an analysis confident on the strength of nine
   samples is the same guess wearing a chart.
+- **The floor, once set, still measures itself.** `eaap_retrieval_top_score` records the *raw*
+  best-match score before any floor is applied, on purpose — it is the only signal left for telling
+  whether a floor should move once one is in effect. `eaap_retrieval_chunks` records the count
+  *after* — zero means the agent actually answered ungrounded, including a search that found
+  something too weak to trust. Two different questions, so one metric intentionally cannot answer
+  both.
 - **Liveness checks nothing; readiness checks Postgres.** A liveness probe wired to the database
   turns a brief blip into a rolling restart of every replica.
 - **Neither `app/agents` nor `app/services` imports from `app/api`.** They raise domain errors and

@@ -71,6 +71,16 @@ class Settings(BaseSettings):
     # small denial of service.
     max_upload_bytes: int = 25 * 1024 * 1024
 
+    # Minimum cosine similarity a chunk must clear to be usable as grounding
+    # evidence. Unset by default, deliberately: a badly-chosen threshold silently
+    # breaks retrieval, and the right value is specific to the embedding model
+    # and the corpus, not a number to guess. `eaap_retrieval_top_score` (built in
+    # the observability chunk) and `calibration_service.recommend_floor` (built
+    # in the evaluation chunk) exist so an operator can set this from a reading
+    # instead of a hunch — see the calibration report before setting it, and
+    # expect to revisit it, not set it once.
+    retrieval_relevance_floor: float | None = None
+
     llm_provider: Literal["openai", "azure"] = "openai"
 
     openai_api_key: str = ""

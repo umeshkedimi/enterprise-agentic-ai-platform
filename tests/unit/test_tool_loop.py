@@ -76,7 +76,7 @@ def searched(monkeypatch):
     """Fake both the graph's automatic search and the search tool's."""
     results: dict[str, list[RetrievedChunk]] = {"initial": [], "tool": []}
 
-    async def fake_search(session, query, *, collection_id, top_k):
+    async def fake_search(session, query, *, collection_id, top_k, settings=None):
         # The graph's first search runs on the raw question; anything after is
         # the model having reformulated it through the tool.
         key = "initial" if query == "How much leave?" else "tool"
