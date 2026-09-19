@@ -10,6 +10,7 @@ from app.models.document import Document, DocumentStatus
 from app.models.schemas import DocumentResponse, Page
 from app.models.tenant import Tenant
 from app.services import document_service
+from app.services.chunking import XLSX_CONTENT_TYPE
 from app.services.errors import NotFoundError
 
 # Upload and listing are nested under a collection — a document only exists
@@ -22,6 +23,10 @@ _EXTENSION_CONTENT_TYPES = {
     ".txt": "text/plain",
     ".md": "text/markdown",
     ".markdown": "text/markdown",
+    ".html": "text/html",
+    ".htm": "text/html",
+    ".csv": "text/csv",
+    ".xlsx": XLSX_CONTENT_TYPE,
 }
 
 _COLLECTION_NOT_FOUND = HTTPException(
@@ -77,7 +82,10 @@ def _resolve_content_type(filename: str, declared_content_type: str | None) -> s
     if inferred is None:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail=f"Unsupported file type for '{filename}'. Supported: pdf, txt, markdown.",
+            detail=(
+                f"Unsupported file type for '{filename}'. "
+                "Supported: pdf, txt, markdown, html, csv, xlsx."
+            ),
         )
     return inferred
 

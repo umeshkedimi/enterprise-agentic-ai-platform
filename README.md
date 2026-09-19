@@ -543,7 +543,7 @@ stays a plain array.
 | POST | `/agents/{id}/conversations/{cid}/evaluations` | tenant | Judge every assistant turn in a thread |
 | GET | `/agents/{id}/calibration` | tenant | What this agent's retrieval scores were worth |
 | GET | `/evaluations/calibration` | tenant | The same reading across the tenant, with a floor recommendation |
-| POST | `/collections/{id}/documents` | tenant | Upload a pdf/txt/markdown document (413 above `MAX_UPLOAD_BYTES`) |
+| POST | `/collections/{id}/documents` | tenant | Upload a pdf/txt/markdown/html/csv/xlsx document (413 above `MAX_UPLOAD_BYTES`) |
 | GET | `/collections/{id}/documents` | tenant | List documents with chunk counts (paged) |
 | DELETE | `/documents/{id}` | tenant | Delete a document and its chunks |
 | POST | `/collections/{id}/golden-examples` | tenant | Record a query and the documents that ought to answer it |
@@ -631,6 +631,17 @@ Request/response contracts: `app/models/schemas.py`.
   deleting, so an answer given under the old version can still be audited against exactly what it
   cited. A partial unique index enforces "at most one current version per key" in Postgres itself,
   not only in application code.
+- **A table (CSV/XLSX) is extracted as "Column: value" pairs per row, not flattened into raw cells.**
+  A spreadsheet dumped as unstructured text loses the one thing that made it a table — which value
+  belonged to which column — the moment a chunk boundary lands inside it. Repeating the header on
+  every row keeps that association intact even split across chunks. This is the ingestion half of
+  table support, deliberately not the whole story: guaranteeing a table survives chunking as one
+  atomic, unsplit unit is later, separate work.
+- **An uploaded HTML page has its boilerplate stripped before extraction, not its structure
+  inferred.** `<script>`, `<style>`, `<nav>`, `<header>`, `<footer>`, `<aside>`, and `<form>` are
+  dropped outright — tags that are reliably never article content — rather than attempting a
+  readability-style "find the main content region" heuristic. Honest about the ceiling: good enough
+  for an internal knowledge-base upload, not a general web-scraping extractor.
 - **Graph state is what gets persisted; context is what does not.** Live handles — session,
   settings, the agent row — travel in per-invocation context, so a checkpointed turn cannot
   resurrect a dead connection, and a resumed conversation reads the agent's current configuration

@@ -6,14 +6,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.logging import get_logger
 from app.models.agent import Collection
 from app.models.document import Document, DocumentChunk, DocumentStatus
-from app.services.chunking import chunk_text, count_tokens, extract_text
+from app.services.chunking import XLSX_CONTENT_TYPE, chunk_text, count_tokens, extract_text
 from app.services.embedding_service import embed_texts
 from app.services.errors import NotFoundError
 from app.services.pagination import DEFAULT_PAGE_LIMIT, paginate, split_page
 
 logger = get_logger(__name__)
 
-SUPPORTED_CONTENT_TYPES = {"application/pdf", "text/plain", "text/markdown"}
+SUPPORTED_CONTENT_TYPES = {
+    "application/pdf",
+    "text/plain",
+    "text/markdown",
+    "text/html",
+    "text/csv",
+    XLSX_CONTENT_TYPE,
+}
 
 
 async def _assert_collection_in_tenant(
