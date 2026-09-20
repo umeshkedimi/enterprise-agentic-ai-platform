@@ -634,9 +634,15 @@ Request/response contracts: `app/models/schemas.py`.
 - **A table (CSV/XLSX) is extracted as "Column: value" pairs per row, not flattened into raw cells.**
   A spreadsheet dumped as unstructured text loses the one thing that made it a table — which value
   belonged to which column — the moment a chunk boundary lands inside it. Repeating the header on
-  every row keeps that association intact even split across chunks. This is the ingestion half of
-  table support, deliberately not the whole story: guaranteeing a table survives chunking as one
-  atomic, unsplit unit is later, separate work.
+  every row keeps that association intact even split across chunks.
+- **Chunking packs whole paragraphs and table rows, never token positions.** The chunker splits text
+  into units — a blank-line-separated paragraph, or (when that's too large, which a multi-row table
+  reliably is) a single line — and only ever cuts *between* units, never inside one; a table row is
+  never split mid-way, only ever kept whole in one chunk or the next. A unit that alone still exceeds
+  the token budget (an unusually long sentence, a pathologically wide row) falls back to the original
+  raw token slicing — the only case where that's still necessary. Proven, not just argued: a test
+  reproduces the old positional-slicing algorithm against a wide-row table and shows it losing a
+  quarter of the rows, while the new chunker loses none on the same input.
 - **An uploaded HTML page has its boilerplate stripped before extraction, not its structure
   inferred.** `<script>`, `<style>`, `<nav>`, `<header>`, `<footer>`, `<aside>`, and `<form>` are
   dropped outright — tags that are reliably never article content — rather than attempting a
