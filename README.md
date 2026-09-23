@@ -654,6 +654,16 @@ Request/response contracts: `app/models/schemas.py`.
   calibration report never have to know hybrid search exists. `HYBRID_SEARCH_ENABLED` (on by
   default) is the escape hatch if a specific corpus ever measures worse with it, via the retrieval
   benchmark harness rather than a guess.
+- **Reranking is a real cost/benefit decision, not a default yes.** After fusion, a small model may
+  reorder a shortlist of the fused candidates before they are cut to `top_k` — asked for an *order*,
+  never a per-passage relevance score, the same lesson the evaluation judge already paid for: a
+  model asked for a calibrated number returns one with no defensible relationship to anything, while
+  a model asked to compare and order is doing the thing it is actually reliable at. Off by default
+  (`RERANKING_ENABLED`), unlike hybrid search — reranking spends a real model call, on the request
+  path, on every retrieval, so its cost is certain and immediate while its benefit is a claim to
+  verify with the benchmark harness first. A failed or unparseable rerank degrades to the pre-rerank
+  order rather than failing the search — a reranker outage costs ranking quality for one turn, never
+  the turn itself.
 - **An uploaded HTML page has its boilerplate stripped before extraction, not its structure
   inferred.** `<script>`, `<style>`, `<nav>`, `<header>`, `<footer>`, `<aside>`, and `<form>` are
   dropped outright — tags that are reliably never article content — rather than attempting a

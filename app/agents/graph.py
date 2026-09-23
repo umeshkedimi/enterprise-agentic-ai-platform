@@ -75,6 +75,7 @@ async def retrieve_node(state: AgentState, runtime: Runtime[OrchestrationContext
                 collection_id=agent.collection_id,
                 top_k=agent.retrieval_top_k,
                 settings=runtime.context.settings,
+                tenant_id=agent.tenant_id,
             )
     except Exception as exc:  # noqa: BLE001 - OpenAI and driver errors are provider types
         # Translated here rather than in the runner because this is the only

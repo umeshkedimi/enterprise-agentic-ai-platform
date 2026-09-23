@@ -160,6 +160,12 @@ LLM_TOKENS = Counter(
 WORKLOAD_SERVING = "serving"
 WORKLOAD_EVALUATION = "evaluation"
 WORKLOAD_SUMMARIZATION = "summarization"
+# Same reasoning as summarization: reranking is on the request path and the
+# caller genuinely waits on it, but it is not the answer being generated —
+# folding it into `serving` would conflate "retrieval took a while" with "the
+# model took a while to write the answer" in the one metric an operator pages
+# on.
+WORKLOAD_RERANKING = "reranking"
 
 # --- Retrieval --------------------------------------------------------------
 

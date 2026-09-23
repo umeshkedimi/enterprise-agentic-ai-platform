@@ -100,6 +100,30 @@ class Settings(BaseSettings):
     # actually test a different value instead of that being a code change.
     hybrid_search_rrf_k: int = 60
 
+    # --- Reranking ---
+    # Off by default, unlike hybrid search above — and for the opposite
+    # reason. Fusion only ever adds candidates vector search alone would have
+    # missed; reranking spends a real model call, on the request path, on
+    # every single retrieval, so its cost is certain and immediate while its
+    # benefit is a claim to verify with the Chunk 8 benchmark harness before
+    # trusting, not a default to assume. An operator turns it on once that
+    # harness shows the fused ranking is still leaving precision on the table.
+    reranking_enabled: bool = False
+    # A dedicated, deliberately small model — the same reasoning
+    # `evaluation_judge_model` uses: this call happens on every retrieval, so
+    # its cost has to be cheap regardless of what model the calling agent
+    # itself is configured with, and reranking is a comparative-ordering task
+    # a small model is defensible at, not a generation task that needs a
+    # large one.
+    reranking_model: str = "gpt-4o-mini"
+    # How many of the fused candidates are sent to the reranker before it
+    # picks the final top_k. Wider than top_k on purpose — reranking a list
+    # already cut down to exactly what will be returned has no room to
+    # improve anything — but capped regardless of top_k, since prompt size
+    # (and therefore cost) scales directly with how many passages are sent.
+    reranking_candidate_pool: int = 15
+    reranking_max_output_tokens: int = 512
+
     llm_provider: Literal["openai", "azure"] = "openai"
 
     openai_api_key: str = ""

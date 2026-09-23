@@ -76,7 +76,7 @@ def searched(monkeypatch):
     """Fake both the graph's automatic search and the search tool's."""
     results: dict[str, list[RetrievedChunk]] = {"initial": [], "tool": []}
 
-    async def fake_search(session, query, *, collection_id, top_k, settings=None):
+    async def fake_search(session, query, *, collection_id, top_k, settings=None, tenant_id=None):
         # The graph's first search runs on the raw question; anything after is
         # the model having reformulated it through the tool.
         key = "initial" if query == "How much leave?" else "tool"
@@ -294,7 +294,7 @@ async def test_a_failing_tool_is_reported_to_the_model_not_raised(
     queue.append(tool_call_response("search_knowledge_base", {"query": "x"}))
     queue.append(text_response("I could not look that up."))
 
-    async def boom(session, query, *, collection_id, top_k):
+    async def boom(session, query, *, collection_id, top_k, tenant_id=None):
         raise RuntimeError("index unavailable")
 
     monkeypatch.setattr("app.tools.builtin.semantic_search", boom)
@@ -381,7 +381,7 @@ async def test_search_tool_scope_comes_from_config_not_from_arguments(
     _, queue = script
     seen: list[uuid.UUID] = []
 
-    async def spy(session, query, *, collection_id, top_k):
+    async def spy(session, query, *, collection_id, top_k, tenant_id=None):
         seen.append(collection_id)
         return []
 

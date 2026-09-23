@@ -37,7 +37,11 @@ async def search_knowledge_base(context: ToolContext, query: str = "", top_k: in
 
     limit = min(top_k or agent.retrieval_top_k, MAX_TOOL_TOP_K)
     results = await semantic_search(
-        context.session, query, collection_id=agent.collection_id, top_k=limit
+        context.session,
+        query,
+        collection_id=agent.collection_id,
+        top_k=limit,
+        tenant_id=agent.tenant_id,
     )
 
     logger.info(

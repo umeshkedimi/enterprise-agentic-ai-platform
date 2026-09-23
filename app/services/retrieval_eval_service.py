@@ -166,7 +166,11 @@ async def run_benchmark(
     results: list[dict] = []
     for example in examples:
         chunks = await semantic_search(
-            session, example.query, collection_id=collection_id, top_k=top_k
+            session,
+            example.query,
+            collection_id=collection_id,
+            top_k=top_k,
+            tenant_id=tenant_id,
         )
         case = _score_case(chunks, set(example.relevant_document_ids))
         results.append(

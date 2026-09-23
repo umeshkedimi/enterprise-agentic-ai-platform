@@ -281,7 +281,7 @@ SECRET_DOCUMENT_TEXT = "Employees accrue twenty-five days of paid annual leave."
 def traced_turn(monkeypatch, spans):
     """Run one real graph turn with both doors to the outside world faked."""
 
-    async def fake_search(session, query, *, collection_id, top_k, settings=None):
+    async def fake_search(session, query, *, collection_id, top_k, settings=None, tenant_id=None):
         return [
             RetrievedChunk(
                 chunk_id=uuid.uuid4(),

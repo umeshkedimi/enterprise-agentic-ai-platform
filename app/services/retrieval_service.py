@@ -8,14 +8,31 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import metrics, tracing
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
+from app.models.agent import Agent
 from app.models.document import Document, DocumentChunk, DocumentStatus
 from app.models.schemas import Citation
+from app.services.completion_service import Turn, complete
 from app.services.embedding_service import embed_text
+from app.services.reranking_prompts import (
+    RERANK_INSTRUCTIONS,
+    build_rerank_request,
+    parse_rerank_response,
+)
 
 logger = get_logger(__name__)
 
 DEFAULT_TOP_K = 5
 SNIPPET_LENGTH = 240
+
+# Namespaced and fixed, same reasoning as the evaluation judge's own id: this
+# agent belongs to the platform, is assembled fresh per call, and is never
+# stored — there is no row for it, only something for logs and traces to name
+# consistently across calls.
+_RERANKER_AGENT_ID = uuid.uuid5(uuid.NAMESPACE_URL, "eaap:reranker")
+# Deterministic ordering, not a creative task — a reranker that returns a
+# different order each time it is asked is not measuring relevance, it is
+# measuring itself. Same reasoning as the judge's own temperature.
+_RERANKER_TEMPERATURE = 0.0
 
 # How many candidates each ranker contributes to fusion, before the fused
 # list is trimmed back to top_k. Wider than top_k on purpose: a chunk full-
@@ -89,6 +106,79 @@ def _row_to_chunk(row) -> RetrievedChunk:
     )
 
 
+def _reranker_agent(*, tenant_id: uuid.UUID, settings: Settings) -> Agent:
+    """Assembled fresh per call, never stored — same shape as the evaluation
+    judge's synthetic agent, for the same reason: `complete()` takes an
+    `Agent`, and routing through it rather than around it is what keeps
+    retries, credential resolution, and token accounting from having a
+    second, uncounted path to a provider."""
+    return Agent(
+        id=_RERANKER_AGENT_ID,
+        # The real tenant, so a reranker's token spend is attributable to
+        # whoever it was spent reordering results for, not a platform bucket.
+        tenant_id=tenant_id,
+        slug="platform-reranker",
+        name="Platform reranker",
+        system_prompt=RERANK_INSTRUCTIONS,
+        model=settings.reranking_model,
+        collection_id=None,
+        tool_allowlist=[],
+        temperature=_RERANKER_TEMPERATURE,
+        max_output_tokens=settings.reranking_max_output_tokens,
+        retrieval_top_k=0,
+        enabled=True,
+    )
+
+
+async def _rerank(
+    query: str,
+    candidates: list[RetrievedChunk],
+    *,
+    top_k: int,
+    tenant_id: uuid.UUID,
+    settings: Settings,
+) -> list[RetrievedChunk]:
+    """Reorder fused candidates by a model's judgement of relevance, and cut
+    to top_k — or fall back to the pre-rerank order unchanged.
+
+    A misbehaving or unreachable reranker costs ranking quality for this one
+    turn, never the turn itself: retrieval already found real candidates
+    before this function was ever called, so the safe default on any
+    failure is exactly what would have been returned without reranking at
+    all. Same posture `conversation_service._advance_summary` already takes
+    for its own request-path model call — log and degrade, don't raise.
+    """
+    numbered = list(enumerate(candidates, start=1))
+    try:
+        completion = await complete(
+            agent=_reranker_agent(tenant_id=tenant_id, settings=settings),
+            turns=[
+                Turn(
+                    role="user",
+                    content=build_rerank_request(
+                        query=query, passages=[(i, c.content) for i, c in numbered]
+                    ),
+                )
+            ],
+            workload=metrics.WORKLOAD_RERANKING,
+            settings=settings,
+        )
+        order = parse_rerank_response(
+            completion.text, expected_ids={i for i, _ in numbered}
+        )
+    except Exception as exc:  # noqa: BLE001 - provider/parse errors, all non-fatal here
+        logger.warning(
+            "reranking_failed",
+            tenant_id=str(tenant_id),
+            candidates=len(candidates),
+            error=type(exc).__name__,
+        )
+        return candidates[:top_k]
+
+    by_number = dict(numbered)
+    return [by_number[i] for i in order][:top_k]
+
+
 async def semantic_search(
     session: AsyncSession,
     query: str,
@@ -96,6 +186,7 @@ async def semantic_search(
     collection_id: uuid.UUID,
     top_k: int = DEFAULT_TOP_K,
     settings: Settings | None = None,
+    tenant_id: uuid.UUID | None = None,
 ) -> list[RetrievedChunk]:
     """Return the top_k chunks best matching `query`, restricted to fully-
     processed, current documents in the given collection.
@@ -107,6 +198,12 @@ async def semantic_search(
     generic surrounding words; full text search alone misses the paraphrases
     and synonyms vector search exists for. Reciprocal rank fusion combines
     the two without ever comparing their incomparable raw scores.
+
+    A wider shortlist of the fused result is then optionally reranked by a
+    model (`reranking_enabled`, off by default — see the setting's own
+    docstring for why) before being cut to top_k. `tenant_id` is only used
+    for that step, to attribute a reranker's token spend to whoever it was
+    spent for; every other caller may safely omit it.
 
     Scoping by collection is the retrieval-time isolation boundary: an agent
     searches only its own collection, so one team's documents can never surface
@@ -174,7 +271,24 @@ async def semantic_search(
             [[row[0].id for row in vector_rows], [row[0].id for row in fts_rows]],
             k=settings.hybrid_search_rrf_k,
         )
-        chunks = [by_id[cid] for cid in fused_ids[:top_k]]
+        fused = [by_id[cid] for cid in fused_ids]
+
+        reranked = False
+        if settings.reranking_enabled and len(fused) > 1:
+            if tenant_id is None:
+                # A caller enabled reranking platform-wide but didn't wire
+                # tenant_id through — a wiring gap, not a runtime failure, so
+                # it costs this turn's ranking quality rather than raising.
+                logger.warning("reranking_skipped_no_tenant_id", collection_id=str(collection_id))
+                chunks = fused[:top_k]
+            else:
+                shortlist = fused[: settings.reranking_candidate_pool]
+                chunks = await _rerank(
+                    query, shortlist, top_k=top_k, tenant_id=tenant_id, settings=settings
+                )
+                reranked = True
+        else:
+            chunks = fused[:top_k]
 
         metrics.RETRIEVAL_REQUESTS.labels("ok").inc()
         metrics.RETRIEVAL_DURATION.observe(time.perf_counter() - started)
@@ -211,6 +325,7 @@ async def semantic_search(
                 tracing.RETRIEVED_CHUNKS: len(chunks),
                 tracing.RETRIEVAL_TOP_SCORE: top_score,
                 "eaap.retrieval.fts_candidates": len(fts_rows),
+                "eaap.retrieval.reranked": reranked,
             },
         )
 
