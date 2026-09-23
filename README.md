@@ -643,6 +643,17 @@ Request/response contracts: `app/models/schemas.py`.
   raw token slicing — the only case where that's still necessary. Proven, not just argued: a test
   reproduces the old positional-slicing algorithm against a wide-row table and shows it losing a
   quarter of the rows, while the new chunker loses none on the same input.
+- **Retrieval fuses vector similarity with Postgres full-text search, by rank, not by score.**
+  Cosine similarity alone under-ranks exact-match queries — a policy code, an account number —
+  against a query's more generic surrounding words; a GIN-indexed `tsvector` column catches those.
+  The two rankings are combined with Reciprocal Rank Fusion, which only ever looks at each
+  candidate's *position* in each ranking, never at cosine similarity and `ts_rank_cd`'s own
+  incomparable numbers directly — normalising two differently-shaped scores onto one scale is a
+  harder, noisier problem RRF sidesteps by not needing to solve it. A chunk's reported `score` stays
+  its real cosine similarity regardless of which ranker found it, so the relevance floor and the
+  calibration report never have to know hybrid search exists. `HYBRID_SEARCH_ENABLED` (on by
+  default) is the escape hatch if a specific corpus ever measures worse with it, via the retrieval
+  benchmark harness rather than a guess.
 - **An uploaded HTML page has its boilerplate stripped before extraction, not its structure
   inferred.** `<script>`, `<style>`, `<nav>`, `<header>`, `<footer>`, `<aside>`, and `<form>` are
   dropped outright — tags that are reliably never article content — rather than attempting a

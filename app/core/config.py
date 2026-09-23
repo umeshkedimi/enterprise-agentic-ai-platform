@@ -81,6 +81,25 @@ class Settings(BaseSettings):
     # expect to revisit it, not set it once.
     retrieval_relevance_floor: float | None = None
 
+    # On by default, unlike the floor above — fusing in a full-text ranking
+    # only ever *adds* candidates a pure vector search would have missed
+    # (an exact policy code, an account number — surface forms embeddings
+    # routinely under-weight against a query's more generic surrounding
+    # words); it does not discard anything vector search found on its own.
+    # The escape hatch exists for the same reason every retrieval-affecting
+    # setting in this platform has one: if the Chunk 8 benchmark harness ever
+    # shows it hurting a specific corpus, an operator can turn it off without
+    # a deploy.
+    hybrid_search_enabled: bool = True
+    # Reciprocal rank fusion's damping constant — the "60" from the original
+    # RRF paper, chosen there (and everywhere since) because it flattens the
+    # difference between adjacent low ranks without needing per-corpus tuning.
+    # A private implementation detail everywhere else would keep this a bare
+    # constant; it is a Setting here so the same measure-before-you-tune
+    # discipline this whole roadmap is built on — the benchmark harness — can
+    # actually test a different value instead of that being a code change.
+    hybrid_search_rrf_k: int = 60
+
     llm_provider: Literal["openai", "azure"] = "openai"
 
     openai_api_key: str = ""

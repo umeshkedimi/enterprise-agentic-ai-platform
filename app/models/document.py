@@ -3,7 +3,8 @@ from datetime import UTC, datetime
 from enum import StrEnum
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Index, String, Text, text
+from sqlalchemy import Boolean, Column, Computed, DateTime, ForeignKey, Index, String, Text, text
+from sqlalchemy.dialects.postgresql import TSVECTOR
 from sqlmodel import Field, SQLModel
 
 EMBEDDING_DIM = 1536
@@ -101,6 +102,25 @@ class DocumentChunk(SQLModel, table=True):
     chunk_index: int
     content: str = Field(sa_column=Column(Text, nullable=False))
     embedding: list[float] = Field(sa_column=Column(Vector(EMBEDDING_DIM), nullable=False))
+    # A Postgres GENERATED column (`to_tsvector('english', content)`), created
+    # by raw SQL in the migration and GIN-indexed there too — the same shape
+    # as the hand-written pgvector HNSW index, and for the same reason:
+    # neither has a SQLModel/SQLAlchemy equivalent that autogenerate can
+    # express. `Computed(...)` here is what tells the ORM to leave this
+    # column out of every INSERT/UPDATE it issues — without it, SQLAlchemy
+    # sends an explicit NULL for the column on every insert, which Postgres
+    # refuses outright for a GENERATED ALWAYS column ("cannot insert a
+    # non-DEFAULT value"). The expression text is never actually sent to the
+    # database from here — the migration's raw SQL already created the
+    # column this way — but Alembic's autogenerate does not manage a
+    # computed column's *expression* even when one is declared, only its
+    # presence, so this cannot drift into proposing to alter it.
+    content_tsv: str | None = Field(
+        default=None,
+        sa_column=Column(
+            TSVECTOR, Computed("to_tsvector('english', content)", persisted=True), nullable=True
+        ),
+    )
     token_count: int
     created_at: datetime = Field(
         default_factory=_utcnow, sa_column=Column(DateTime(timezone=True), nullable=False)

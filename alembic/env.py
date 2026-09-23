@@ -42,10 +42,14 @@ def include_object(object, name, type_, reflected, compare_to):
     autogenerate's default reading of "in the DB, not in the models" is "drop
     it" for both:
 
-    * The pgvector HNSW index, created with raw SQL because its
-      `USING hnsw (embedding vector_cosine_ops)` form has no SQLModel/SQLAlchemy
-      equivalent. Dropping it silently turns semantic search into a sequential
-      scan — a performance failure with no error attached.
+    * Hand-written Postgres-specific indexes — the pgvector HNSW index
+      (`USING hnsw (embedding vector_cosine_ops)`) and the full-text GIN index
+      over `document_chunks.content_tsv` — created with raw SQL because neither
+      form has a SQLModel/SQLAlchemy equivalent autogenerate can compare
+      against. Dropping either silently turns its half of retrieval (semantic
+      or lexical) into a sequential scan — a performance failure with no error
+      attached, not a correctness one, which is exactly the kind of drop a
+      migration review is least likely to catch by reading the diff.
     * The checkpointer's tables, which LangGraph creates and migrates itself. We
       do not own their schema and must not: hand-writing migrations for them
       would pin us to one library version forever, and a dropped checkpoint
@@ -54,7 +58,7 @@ def include_object(object, name, type_, reflected, compare_to):
     Both are excluded here. Neither is unmanaged — each is owned by something
     other than this metadata.
     """
-    if type_ == "index" and name and name.endswith("_hnsw"):
+    if type_ == "index" and name and name.endswith(("_hnsw", "_fts")):
         return False
     if type_ == "table" and name in LANGGRAPH_TABLES:
         return False
