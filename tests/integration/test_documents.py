@@ -11,7 +11,7 @@ import uuid
 import pytest
 
 from app.core.config import get_settings
-from tests.integration.conftest import create_collection
+from tests.integration.conftest import create_collection, get_document, process_queued_documents
 
 
 def _txt_file():
@@ -96,8 +96,12 @@ async def test_upload_under_the_size_limit_still_ingests(
         f"/collections/{coll_id}/documents",
         files={"file": ("small.txt", io.BytesIO(b"vacation policy applies"), "text/plain")},
     )
-    assert r.status_code == 201, r.text
-    assert r.json()["status"] == "ready"
+    assert r.status_code == 202, r.text
+    assert r.json()["status"] == "uploaded"
+
+    await process_queued_documents()
+    entry = await get_document(client, coll_id, r.json()["id"])
+    assert entry["status"] == "ready", entry.get("error_message")
 
 
 async def test_delete_missing_document_is_404(authed_client):

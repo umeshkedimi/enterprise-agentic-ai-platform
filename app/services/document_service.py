@@ -32,15 +32,28 @@ async def _assert_collection_in_tenant(
 
 
 async def _current_version_id(
-    session: AsyncSession, *, collection_id: uuid.UUID, document_key: str
+    session: AsyncSession,
+    *,
+    collection_id: uuid.UUID,
+    document_key: str,
+    excluding: uuid.UUID | None = None,
 ) -> uuid.UUID | None:
-    return await session.scalar(
-        select(Document.id).where(
-            Document.collection_id == collection_id,
-            Document.document_key == document_key,
-            Document.is_current.is_(True),
-        )
-    )
+    """The current version under a key, if any.
+
+    `excluding` matters only when this is called from `process_document`: by
+    then the row being processed already exists in the table (it was created
+    at upload time), so a naive query would find *itself* if it happened to
+    already be `is_current` — which is exactly the "first upload under a new
+    key" case, see `create_upload`.
+    """
+    conditions = [
+        Document.collection_id == collection_id,
+        Document.document_key == document_key,
+        Document.is_current.is_(True),
+    ]
+    if excluding is not None:
+        conditions.append(Document.id != excluding)
+    return await session.scalar(select(Document.id).where(*conditions))
 
 
 async def _supersede(session: AsyncSession, *, previous_document_id: uuid.UUID) -> None:
@@ -69,7 +82,7 @@ async def _supersede(session: AsyncSession, *, previous_document_id: uuid.UUID) 
         await session.commit()
 
 
-async def upload_document(
+async def create_upload(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
@@ -78,24 +91,27 @@ async def upload_document(
     content_type: str,
     content: bytes,
     document_key: str | None = None,
-) -> tuple[Document, int]:
-    """Create a Document in a collection and process it: extract, chunk, embed, store.
+) -> Document:
+    """Record an upload and queue it — this is the entire request-path cost
+    of ingestion now. Extraction, chunking, and embedding happen later, in
+    the worker, never here: the collection ownership check and the write
+    below are the only things this function does before returning.
 
     The collection is verified to belong to the calling tenant first, so a
-    caller cannot ingest into another team's knowledge scope. On any processing
-    failure the document is left FAILED with an error_message rather than
-    raising — callers decide how to surface that to the API layer.
+    caller cannot queue work into another team's knowledge scope. The raw
+    bytes are stored on the row itself (`raw_content`) because the worker
+    that will read them runs in a different process, at a different time,
+    than this one — they have to live somewhere durable a caller other than
+    this one can reach, and Postgres is already the platform's one hard
+    dependency for exactly this kind of thing.
 
-    `document_key` is how a re-upload supersedes an earlier version instead of
-    sitting beside it as an unrelated document that retrieval can't tell apart
-    from the one it's meant to replace. A document uploaded under a key that
-    already has a current version starts life as `is_current=False` — it only
-    becomes the current version once ingestion actually succeeds, in
-    `_supersede`, so a bad re-upload (empty file, unreadable PDF) fails without
-    ever taking the working version off retrieval. Never deletes the version it
-    replaces: its chunks stay in the table, unreadable to fresh retrieval but
-    still recoverable by id, because an audit of an answer given under the old
-    version still needs to read what it actually cited.
+    `document_key` is how a re-upload will supersede an earlier version
+    instead of sitting beside it as an unrelated document retrieval can't
+    tell apart from the one it's meant to replace — decided here only for
+    whether *this* row starts as the current version (true iff nothing
+    already holds that key); which row it actually supersedes, if any, is
+    re-derived fresh when processing succeeds, in `process_document`, not
+    carried across the gap between queuing and claiming.
     """
     await _assert_collection_in_tenant(
         session, tenant_id=tenant_id, collection_id=collection_id
@@ -114,17 +130,32 @@ async def upload_document(
         status=DocumentStatus.UPLOADED,
         document_key=document_key,
         is_current=previous_version_id is None,
+        raw_content=content,
     )
     session.add(document)
     await session.commit()
     await session.refresh(document)
+    return document
 
+
+async def process_document(session: AsyncSession, document: Document) -> int:
+    """Extract, chunk, embed, and store one already-claimed document.
+
+    Called only by the ingestion worker, on a document whose status the
+    worker has already moved to PROCESSING under its own claim (see
+    `app/services/ingestion_worker.py`) — this function does not claim
+    anything itself, so it must never be called against a row another
+    worker might also be holding.
+
+    On any failure the document is left FAILED with an error_message rather
+    than raising — the worker logs and moves on to the next document; there
+    is no request waiting on this one to fail loudly. `raw_content` is
+    cleared on every terminal outcome, success or failure: once a document
+    is chunked or abandoned, the original bytes serve no further purpose.
+    """
     chunk_count = 0
     try:
-        document.status = DocumentStatus.PROCESSING
-        await session.commit()
-
-        text = extract_text(content, content_type)
+        text = extract_text(document.raw_content, document.content_type)
         chunks = chunk_text(text)
         if not chunks:
             raise ValueError("Document contained no extractable text.")
@@ -143,27 +174,38 @@ async def upload_document(
             )
         chunk_count = len(chunks)
 
-        if previous_version_id is not None:
-            await _supersede(session, previous_document_id=previous_version_id)
+        if document.document_key:
+            previous_version_id = await _current_version_id(
+                session,
+                collection_id=document.collection_id,
+                document_key=document.document_key,
+                excluding=document.id,
+            )
+            if previous_version_id is not None:
+                await _supersede(session, previous_document_id=previous_version_id)
             document.is_current = True
 
         document.status = DocumentStatus.READY
+        document.raw_content = None
         await session.commit()
-        await session.refresh(document)
     except Exception as exc:  # noqa: BLE001 - any failure here marks the document failed
         await session.rollback()
         document.status = DocumentStatus.FAILED
         document.error_message = str(exc)[:500]
-        # is_current is already False here whenever this upload was superseding
-        # something — it was never flipped, because that only happens after the
-        # try block succeeds. The previous version, untouched, is still current.
+        document.raw_content = None
+        # is_current is left exactly as `create_upload` set it: True only if
+        # this document held no key or was the first upload under one, in
+        # which case there was nothing to supersede and nothing wrong with
+        # leaving it current — a failed, chunkless document simply has
+        # nothing for retrieval to find. False whenever a real previous
+        # version exists, since supersession only ever happens after success
+        # above — that previous version, untouched, is still current.
         session.add(document)
         await session.commit()
-        await session.refresh(document)
         chunk_count = 0
         logger.error("document_processing_failed", document_id=str(document.id), error=str(exc))
 
-    return document, chunk_count
+    return chunk_count
 
 
 async def list_documents(

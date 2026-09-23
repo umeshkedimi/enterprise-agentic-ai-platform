@@ -31,8 +31,11 @@ anything not built is under the explicitly-marked backlog below.
   The platform adapts the agent's execution policy to what each model actually accepts: current
   Anthropic models reject `temperature`, so it is withheld and logged rather than 400-ing the
   request. Token usage is normalised across providers and returned with every completion.
-- Document ingestion pipeline — upload into a collection, text extraction (PDF/txt/markdown),
-  token-based chunking, batched embedding with retry, persistence to pgvector.
+- Document ingestion pipeline — upload into a collection (pdf/txt/markdown/html/csv/xlsx), text
+  extraction, structure-aware chunking, batched embedding with retry, persistence to pgvector. The
+  request only queues the upload (`202`, `status: "uploaded"`); a separate worker process claims
+  and processes it (`SELECT ... FOR UPDATE SKIP LOCKED` over Postgres, not a broker), so nothing on
+  the request path waits on extraction, chunking, or an embedding call.
 - Semantic retrieval — cosine similarity search over chunks, scoped by collection and document
   status, so one team's knowledge never surfaces in another's results.
 - Retrieval-grounded chat — one LangGraph workflow serves every agent, branching on configuration
@@ -92,12 +95,10 @@ anything not built is under the explicitly-marked backlog below.
 
 **Backlog (not implemented)**
 
-Federated auth (OIDC/SSO) · async ingestion via Celery/RabbitMQ (ingestion runs inside the upload
-request today, which is why an upload is size-capped) · queued and scheduled evaluation runs (the
-harness is synchronous today, and idempotent, which is what would make a queue easy to add) · alert
-rules and SLOs · Redis-backed MCP discovery cache (in-process today, wrong for many replicas) ·
-OAuth for MCP servers (bearer tokens only) · per-tenant usage rollup · Kubernetes manifests ·
-static type checking.
+Federated auth (OIDC/SSO) · queued and scheduled evaluation runs (the harness is synchronous today,
+and idempotent, which is what would make a queue easy to add) · alert rules and SLOs · OAuth for
+MCP servers (bearer tokens only) · per-tenant usage rollup · Kubernetes manifests · static type
+checking · deterministic numeric-claim verification for the evaluation judge.
 
 One deliberate non-item: retrieval still has no relevance-score floor. It is now *measurable* rather
 than guessable — see [Evaluation](#evaluation) — but choosing a threshold trades ungrounded answers
@@ -118,9 +119,6 @@ flowchart TB
     EU(["End user"])
 
     TO -->|"A · configure, once"| CFG["POST /agents<br/>POST /collections/{id}/documents<br/>POST /mcp-servers"]
-    CFG --> ING["extract → chunk → embed"]
-
-    ING --> DB
     CFG --> DB
 
     subgraph DB["Shared state — Postgres"]
@@ -129,6 +127,9 @@ flowchart TB
         TRANS[("conversations<br/>conversation_messages")]
         EVALS[("turn_evaluations")]
     end
+
+    DB -.->|"queued, off the request"| WORKER["ingestion worker<br/>extract → chunk → embed"]
+    WORKER --> VEC
 
     EU -->|"B · answer, per request"| CHAT["POST /agents/{id}/chat"]
     CHAT --> GRAPH["LangGraph turn<br/>retrieve → generate ⇄ tools"]
@@ -143,9 +144,13 @@ flowchart TB
     EVALS --> CAL["calibration report"]
 ```
 
-Flow C hangs off the transcript by a dotted line on purpose: nothing on the request path waits for
-it, so an evaluator outage costs the platform its scores and never its answers. Flow B reads config
-it never wrote, which is the whole thesis — the runtime is a constant and the agent is a row.
+Ingestion hangs off the shared state by a dotted line for the same reason Flow C does: a
+`POST .../documents` request only writes a queued row, and a separate worker process — not this
+request, not any other — claims it later (`SELECT ... FOR UPDATE SKIP LOCKED`) and does the actual
+extract/chunk/embed work. Flow C hangs off the transcript by a dotted line on purpose: nothing on
+the request path waits for it, so an evaluator outage costs the platform its scores and never its
+answers. Flow B reads config it never wrote, which is the whole thesis — the runtime is a constant
+and the agent is a row.
 
 ### Layers
 
@@ -339,6 +344,13 @@ uv run alembic upgrade head
 uv run uvicorn app.main:app --reload
 ```
 
+In a second terminal, the ingestion worker — nothing uploaded becomes searchable without it, since
+`POST .../documents` only queues:
+
+```bash
+uv run python -m app.worker
+```
+
 Interactive API docs at `http://localhost:8000/docs` (disabled when `APP_ENV=production`).
 
 ## Walkthrough
@@ -366,6 +378,9 @@ AUTH="Authorization: Bearer $KEY"
 COLLECTION=$(curl -sX POST $BASE/collections -H "$AUTH" -H "$JSON" \
   -d '{"slug":"hr-policies","name":"HR Policies"}' | jq -r .id)
 
+# Queues the upload and returns immediately (202) — the worker started above
+# picks it up within its poll interval (2s by default) and moves it to
+# "ready". GET the collection's documents to watch that happen.
 curl -sX POST $BASE/collections/$COLLECTION/documents -H "$AUTH" -F file=@handbook.pdf
 
 # The agent is a row. This POST is the entire onboarding.
@@ -543,7 +558,7 @@ stays a plain array.
 | POST | `/agents/{id}/conversations/{cid}/evaluations` | tenant | Judge every assistant turn in a thread |
 | GET | `/agents/{id}/calibration` | tenant | What this agent's retrieval scores were worth |
 | GET | `/evaluations/calibration` | tenant | The same reading across the tenant, with a floor recommendation |
-| POST | `/collections/{id}/documents` | tenant | Upload a pdf/txt/markdown/html/csv/xlsx document (413 above `MAX_UPLOAD_BYTES`) |
+| POST | `/collections/{id}/documents` | tenant | Queue a pdf/txt/markdown/html/csv/xlsx document for ingestion — `202`, not `201` (413 above `MAX_UPLOAD_BYTES`) |
 | GET | `/collections/{id}/documents` | tenant | List documents with chunk counts (paged) |
 | DELETE | `/documents/{id}` | tenant | Delete a document and its chunks |
 | POST | `/collections/{id}/golden-examples` | tenant | Record a query and the documents that ought to answer it |
@@ -625,6 +640,17 @@ Request/response contracts: `app/models/schemas.py`.
   string rather than an elevated directive.
 - **A failed retrieval fails the turn.** Answering anyway would quietly downgrade a grounded
   assistant to an ungrounded one at the moment nobody is watching.
+- **Ingestion is queued in Postgres, not Celery.** `POST .../documents` only writes a row
+  (`status: "uploaded"`) and returns `202`; a separate worker process claims it later with
+  `SELECT ... FOR UPDATE SKIP LOCKED` and does the extract/chunk/embed work a broker would otherwise
+  be asked to schedule. Postgres is already this platform's one hard dependency, and a broker earns
+  its place at a throughput this platform has never measured — adding one would be infrastructure
+  bought for a load that doesn't exist yet. `SKIP LOCKED` is what makes the same query safe from more
+  than one worker replica at once, proven directly: a test runs two claims concurrently against one
+  queued document and asserts exactly one of them gets it.
+- **A half-ingested document costs nothing to keep safe.** Retrieval already filtered on
+  `Document.status == READY` before ingestion became async — a row still sitting in the queue is
+  already invisible to search, for free, with no isolation work added to make queuing safe.
 - **A re-upload supersedes, it doesn't sit beside.** Uploading under the same `document_key`
   retires the previous version the moment the new one reaches `READY` — never earlier, so a bad
   re-upload (a corrupt file) fails without taking the working version off retrieval, and never by

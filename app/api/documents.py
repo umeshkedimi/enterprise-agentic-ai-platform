@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import PageParams, get_current_tenant, page_params
 from app.core.config import get_settings
 from app.db.session import get_db_session
-from app.models.document import Document, DocumentStatus
+from app.models.document import Document
 from app.models.schemas import DocumentResponse, Page
 from app.models.tenant import Tenant
 from app.services import document_service
@@ -107,7 +107,7 @@ def _to_response(document: Document, chunk_count: int) -> DocumentResponse:
 @router.post(
     "/collections/{collection_id}/documents",
     response_model=DocumentResponse,
-    status_code=status.HTTP_201_CREATED,
+    status_code=status.HTTP_202_ACCEPTED,
 )
 async def upload_document(
     collection_id: uuid.UUID,
@@ -120,10 +120,23 @@ async def upload_document(
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_db_session),
 ) -> DocumentResponse:
+    """Queue a document for ingestion and return immediately.
+
+    202, not 201: the row this creates is real, but extraction, chunking, and
+    embedding have not happened yet — a worker does that later, off this
+    request entirely. `GET /collections/{id}/documents` is the polling
+    surface, and already returns `status`/`error_message`; there is no
+    separate endpoint to check one upload's progress, because the list is
+    already where a caller would be looking for it.
+    """
     content_type = _resolve_content_type(file.filename, file.content_type)
 
     # The parser's own count, when it has one, refuses an oversized upload
-    # without reading it back at all. The bounded read below is the guarantee.
+    # without reading it back at all. The bounded read below is the
+    # guarantee. Both checks still happen synchronously, on purpose — a
+    # caller sending something the platform will never accept should be told
+    # now, not have it silently queued and fail later with no request left
+    # to answer.
     limit = get_settings().max_upload_bytes
     if file.size is not None and file.size > limit:
         raise _too_large(limit)
@@ -135,7 +148,7 @@ async def upload_document(
         )
 
     try:
-        document, chunk_count = await document_service.upload_document(
+        document = await document_service.create_upload(
             session,
             tenant_id=tenant.id,
             collection_id=collection_id,
@@ -147,13 +160,7 @@ async def upload_document(
     except NotFoundError as exc:
         raise _COLLECTION_NOT_FOUND from exc
 
-    if document.status == DocumentStatus.FAILED:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=document.error_message or "Document processing failed.",
-        )
-
-    return _to_response(document, chunk_count)
+    return _to_response(document, chunk_count=0)
 
 
 @router.get(

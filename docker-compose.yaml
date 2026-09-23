@@ -44,6 +44,31 @@ services:
       redis:
         condition: service_healthy
 
+  # The ingestion worker — same image as `app`, different process. Polls
+  # `documents.status = 'uploaded'` (`SELECT ... FOR UPDATE SKIP LOCKED`,
+  # see app/services/ingestion_worker.py) and does the extract/chunk/embed
+  # work that `POST /collections/{id}/documents` used to do inline. No
+  # broker, no second queue service: Postgres is already the one hard
+  # dependency, and this platform's throughput has never earned one.
+  # Scale by running more replicas of this service — SKIP LOCKED is what
+  # makes that safe, not a leader-election scheme.
+  worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: ["python", "-m", "app.worker"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://eaap:eaap@postgres:5432/eaap
+      DATABASE_URL_SYNC: postgresql+psycopg://eaap:eaap@postgres:5432/eaap
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
   # --- Observability -------------------------------------------------------
   #
   # Behind a profile, so `docker compose up -d postgres redis` — the command

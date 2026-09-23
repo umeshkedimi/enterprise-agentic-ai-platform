@@ -1,10 +1,19 @@
 """End-to-end document versioning: a re-upload supersedes, it never contradicts.
 
 Only the embedding and chat-provider calls are faked. Everything else — the
-upload flow's two-commit supersession, the real pgvector query now filtering on
-`is_current`, and the partial unique index itself — runs against a real
-Postgres, because the property worth pinning is that the database, not just the
-service function, refuses two current versions of one document.
+queue-and-process ingestion flow, the two-commit supersession inside
+`process_document`, the real pgvector query now filtering on `is_current`, and
+the partial unique index itself — runs against a real Postgres, because the
+property worth pinning is that the database, not just the service function,
+refuses two current versions of one document.
+
+Upload is now two steps, not one: `POST .../documents` only queues (202,
+`status: "uploaded"`), and `process_queued_documents()` (from conftest) is
+what actually runs the worker's own claim-and-process code against it. Tests
+that care what a document looked like *before* processing — whether this
+upload's `is_current` reflects something it is about to supersede — check the
+raw 202 response; tests that care what happens *after* re-fetch through
+`get_document`.
 """
 
 import io
@@ -20,7 +29,12 @@ from app.models.agent import Agent
 from app.models.document import Document, DocumentStatus
 from app.tools.builtin import list_documents as list_documents_tool
 from app.tools.registry import ToolContext
-from tests.integration.conftest import create_agent, create_collection
+from tests.integration.conftest import (
+    create_agent,
+    create_collection,
+    get_document,
+    process_queued_documents,
+)
 
 VACATION_V1 = (
     b"Vacation policy. Full-time employees accrue twenty-five days of paid annual "
@@ -68,15 +82,21 @@ async def test_reupload_under_the_same_key_supersedes_the_previous_version(
     first = await upload(
         client, collection_id, "vacation.txt", VACATION_V1, document_key="vacation"
     )
-    assert first.status_code == 201, first.text
+    assert first.status_code == 202, first.text
+    # Nothing to supersede yet — the first upload under a key is current the
+    # moment it's queued, not only once it finishes processing.
     assert first.json()["is_current"] is True
     assert first.json()["document_key"] == "vacation"
 
     second = await upload(
         client, collection_id, "vacation.txt", VACATION_V2, document_key="vacation"
     )
-    assert second.status_code == 201, second.text
-    assert second.json()["is_current"] is True
+    assert second.status_code == 202, second.text
+    # Not current yet — a previous version already holds that slot, and
+    # supersession only happens once this upload actually succeeds.
+    assert second.json()["is_current"] is False
+
+    await process_queued_documents()
 
     listed = await client.get(f"/collections/{collection_id}/documents")
     by_id = {d["id"]: d for d in listed.json()["items"]}
@@ -106,15 +126,24 @@ async def test_a_failed_reupload_leaves_the_previous_version_current(
     client, _ = authed_client
     collection_id = await create_collection(client, "hr")
 
-    good = await upload(client, collection_id, "vacation.txt", VACATION_V1, document_key="vacation")
-    assert good.json()["is_current"] is True
+    good = await upload(
+        client, collection_id, "vacation.txt", VACATION_V1, document_key="vacation"
+    )
+    assert good.status_code == 202, good.text
+    await process_queued_documents()
+    good_entry = await get_document(client, collection_id, good.json()["id"])
+    assert good_entry["status"] == "ready"
+    assert good_entry["is_current"] is True
 
-    # Whitespace-only content extracts to no chunks, which upload_document
+    # Whitespace-only content extracts to no chunks, which process_document
     # treats as a processing failure — the same path a corrupt PDF would hit.
+    # It queues and returns 202 exactly like a good upload would; there is no
+    # request left by the time it actually fails.
     bad = await upload(
         client, collection_id, "vacation.txt", WHITESPACE_ONLY, document_key="vacation"
     )
-    assert bad.status_code == 422, bad.text
+    assert bad.status_code == 202, bad.text
+    await process_queued_documents()
 
     listed = await client.get(f"/collections/{collection_id}/documents")
     by_id = {d["id"]: d for d in listed.json()["items"]}
@@ -132,7 +161,9 @@ async def test_superseded_version_is_not_retrieved(
     client, _ = authed_client
     collection_id = await create_collection(client, "hr")
     await upload(client, collection_id, "vacation.txt", VACATION_V1, document_key="vacation")
+    await process_queued_documents()
     await upload(client, collection_id, "vacation.txt", VACATION_V2, document_key="vacation")
+    await process_queued_documents()
 
     agent_id = await create_agent(client, slug="hr-bot", collection_id=collection_id)
     r = await client.post(
@@ -150,8 +181,14 @@ async def test_list_documents_tool_shows_only_the_current_version(
 ):
     client, _ = authed_client
     collection_id = await create_collection(client, "hr")
-    await upload(client, collection_id, "vacation_v1.txt", VACATION_V1, document_key="vacation")
-    await upload(client, collection_id, "vacation_v2.txt", VACATION_V2, document_key="vacation")
+    await upload(
+        client, collection_id, "vacation_v1.txt", VACATION_V1, document_key="vacation"
+    )
+    await process_queued_documents()
+    await upload(
+        client, collection_id, "vacation_v2.txt", VACATION_V2, document_key="vacation"
+    )
+    await process_queued_documents()
     agent_id = await create_agent(client, slug="hr-bot", collection_id=collection_id)
 
     async with async_session_factory() as session:

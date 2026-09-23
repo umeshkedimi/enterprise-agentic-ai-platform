@@ -64,12 +64,22 @@ class Settings(BaseSettings):
     # something that changes between two turns of one conversation.
     mcp_tool_cache_ttl_seconds: int = 300
 
-    # Ceiling on a single uploaded document. Ingestion runs inside the request —
-    # extract, chunk, embed, store — so an unbounded upload is an unbounded
-    # request holding a database session and a provider connection. The number is
-    # a policy choice, not a technical limit: 25 MB is a large policy PDF and a
-    # small denial of service.
+    # Ceiling on a single uploaded document. Extraction, chunking, and
+    # embedding now run in the worker, not the request — but the bytes still
+    # have to be read into memory and stored in Postgres before the worker
+    # ever sees them, and an unbounded upload is unbounded work for whichever
+    # process holds it at the time. The number is a policy choice, not a
+    # technical limit: 25 MB is a large policy PDF and a small denial of
+    # service.
     max_upload_bytes: int = 25 * 1024 * 1024
+
+    # How long the ingestion worker sleeps after finding nothing queued
+    # before polling again. A straight `SELECT ... FOR UPDATE SKIP LOCKED`
+    # poll rather than `LISTEN`/`NOTIFY` or a broker — Postgres is already
+    # this platform's one hard dependency, and a queue at this throughput
+    # does not earn a second one. The cost of polling is this number: an
+    # upload can wait up to this long for a worker to notice it queued.
+    ingestion_poll_interval_seconds: float = 2.0
 
     # Minimum cosine similarity a chunk must clear to be usable as grounding
     # evidence. Unset by default, deliberately: a badly-chosen threshold silently

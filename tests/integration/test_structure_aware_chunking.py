@@ -2,16 +2,14 @@
 
 The unit suite already proves the chunker's guarantee in isolation (a row
 never splits, and the old algorithm demonstrably could). This is the
-same claim through the real pipeline: `document_service.upload_document` →
+same claim through the real pipeline: `document_service.process_document` →
 the real `chunk_text` → real embeddings (faked) → real pgvector storage →
 the Chunk 8 benchmark harness, which is exactly the validation loop the RAG
 roadmap promised — rerun the harness after a chunking change and read the
 number, rather than trust that it helped.
 """
 
-import io
-
-from tests.integration.conftest import create_collection
+from tests.integration.conftest import create_collection, get_document, upload_document
 
 LEAVE_CSV_HEADER = b"Employee,Days,Department,Location,Manager\n"
 
@@ -29,14 +27,12 @@ async def test_facts_scattered_across_a_large_table_are_all_recallable(
     client, _ = authed_client
     collection_id = await create_collection(client, "hr")
 
-    upload = await client.post(
-        f"/collections/{collection_id}/documents",
-        files={"file": ("leave.csv", io.BytesIO(_wide_leave_csv(80)), "text/csv")},
+    doc_id = await upload_document(
+        client, collection_id, "leave.csv", _wide_leave_csv(80), content_type="text/csv"
     )
-    assert upload.status_code == 201, upload.text
-    doc_id = upload.json()["id"]
     # More than one chunk, or this test is not exercising a boundary at all.
-    assert upload.json()["chunk_count"] > 1
+    entry = await get_document(client, collection_id, doc_id)
+    assert entry["chunk_count"] > 1
 
     # Golden examples spread across the document — early, middle, late row —
     # so a fact that landed near a chunk boundary is exactly as likely to be

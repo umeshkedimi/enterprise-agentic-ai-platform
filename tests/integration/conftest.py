@@ -140,14 +140,64 @@ async def create_collection(client, slug: str) -> str:
     return r.json()["id"]
 
 
-async def upload_document(client, collection_id: str, filename: str, body: bytes) -> str:
+async def process_queued_documents() -> None:
+    """Drain the ingestion queue in-process, the way the real worker would.
+
+    Uploading through the API now only queues a document — that is the
+    response contract this platform settled on once ingestion moved off the
+    request path (Chunk 15). Calling the real worker's own claim-and-process
+    function here, against its own session exactly as production would,
+    keeps a test exercising the actual code path rather than a shortcut that
+    happens to leave the right rows in the right state.
+    """
+    from app.services.ingestion_worker import process_next_document
+
+    while await process_next_document(async_session_factory):
+        pass
+
+
+async def get_document(client, collection_id: str, document_id: str) -> dict:
+    """Re-fetch one document's current fields.
+
+    There is no single-document GET — the list endpoint is already the
+    polling surface `GET /collections/{id}/documents` is documented as, so
+    this just finds the one row a caller wants inside it.
+    """
+    listed = await client.get(f"/collections/{collection_id}/documents")
+    assert listed.status_code == 200, listed.text
+    return next(d for d in listed.json()["items"] if d["id"] == document_id)
+
+
+async def upload_document(
+    client,
+    collection_id: str,
+    filename: str,
+    body: bytes,
+    *,
+    content_type: str = "text/plain",
+    document_key: str | None = None,
+) -> str:
+    """Upload a document and wait for it to reach READY.
+
+    Asserts readiness rather than leaving that to each call site: every
+    existing caller of this helper predates async ingestion and wants
+    exactly the same thing it always did — a usable document id, with
+    ingestion having already happened by the time this returns.
+    """
+    data = {"document_key": document_key} if document_key else {}
     r = await client.post(
         f"/collections/{collection_id}/documents",
-        files={"file": (filename, io.BytesIO(body), "text/plain")},
+        data=data,
+        files={"file": (filename, io.BytesIO(body), content_type)},
     )
-    assert r.status_code == 201, r.text
-    assert r.json()["status"] == "ready", r.text
-    return r.json()["id"]
+    assert r.status_code == 202, r.text
+    document_id = r.json()["id"]
+
+    await process_queued_documents()
+
+    entry = await get_document(client, collection_id, document_id)
+    assert entry["status"] == "ready", entry.get("error_message")
+    return document_id
 
 
 async def create_agent(client, *, slug: str, collection_id: str | None, **overrides) -> str:

@@ -1,12 +1,13 @@
 """HTML pages and tables (CSV/XLSX), ingested and actually retrievable.
 
 Unlike the txt/pdf fixtures elsewhere, these tests send the real MIME type for
-each file — the `upload_document` conftest helper hardcodes `text/plain`,
-which is itself a *supported* type, so reusing it here would upload an HTML
-page as plain text and never touch the new extractor. Only the embedding call
-is faked; extraction, chunking, storage, and the real pgvector query all run,
-because the property under test is that a table's column/value pairing and an
-HTML page's real content — not its chrome — are what actually gets embedded.
+each file — the default `text/plain` `upload_document` otherwise sends is
+itself a *supported* type, so leaving it at the default here would upload an
+HTML page as plain text and never touch the new extractor. Only the
+embedding call is faked; extraction, chunking, storage, and the real
+pgvector query all run, because the property under test is that a table's
+column/value pairing and an HTML page's real content — not its chrome — are
+what actually gets embedded.
 """
 
 import io
@@ -20,7 +21,12 @@ from openpyxl import Workbook
 from app.db.session import async_session_factory
 from app.services.chunking import XLSX_CONTENT_TYPE
 from app.services.retrieval_service import semantic_search
-from tests.integration.conftest import create_agent, create_collection
+from tests.integration.conftest import (
+    create_agent,
+    create_collection,
+    get_document,
+    upload_document,
+)
 
 HTML_PAGE = b"""
 <html>
@@ -70,16 +76,6 @@ def captured(monkeypatch):
     return calls
 
 
-async def upload(client, collection_id: str, filename: str, body: bytes, content_type: str):
-    r = await client.post(
-        f"/collections/{collection_id}/documents",
-        files={"file": (filename, io.BytesIO(body), content_type)},
-    )
-    assert r.status_code == 201, r.text
-    assert r.json()["status"] == "ready", r.text
-    return r.json()["id"]
-
-
 async def test_an_html_page_is_ingested_with_boilerplate_stripped(
     authed_client, fake_embeddings, provider_creds, captured
 ):
@@ -87,7 +83,9 @@ async def test_an_html_page_is_ingested_with_boilerplate_stripped(
     confirm the chrome never made it into what got embedded."""
     client, _ = authed_client
     collection_id = await create_collection(client, "intranet")
-    await upload(client, collection_id, "remote-work.html", HTML_PAGE, "text/html")
+    await upload_document(
+        client, collection_id, "remote-work.html", HTML_PAGE, content_type="text/html"
+    )
     agent_id = await create_agent(client, slug="hr-bot", collection_id=collection_id)
 
     r = await client.post(f"/agents/{agent_id}/chat", json={"message": "Can I work remotely?"})
@@ -108,7 +106,7 @@ async def test_a_csv_row_keeps_its_column_labels_through_retrieval(
     both names and numbers into the same unlabeled block of text."""
     client, _ = authed_client
     collection_id = await create_collection(client, "hr")
-    await upload(client, collection_id, "leave.csv", LEAVE_CSV, "text/csv")
+    await upload_document(client, collection_id, "leave.csv", LEAVE_CSV, content_type="text/csv")
 
     async with async_session_factory() as session:
         chunks = await semantic_search(
@@ -124,7 +122,9 @@ async def test_an_xlsx_row_keeps_its_column_labels_through_retrieval(
 ):
     client, _ = authed_client
     collection_id = await create_collection(client, "hr")
-    await upload(client, collection_id, "leave.xlsx", _leave_xlsx(), XLSX_CONTENT_TYPE)
+    await upload_document(
+        client, collection_id, "leave.xlsx", _leave_xlsx(), content_type=XLSX_CONTENT_TYPE
+    )
 
     async with async_session_factory() as session:
         chunks = await semantic_search(
@@ -143,11 +143,10 @@ async def test_a_csv_uploaded_with_a_generic_browser_content_type_still_resolves
     don't recognise — the extension fallback exists precisely for this."""
     client, _ = authed_client
     collection_id = await create_collection(client, "hr")
-    doc_id = await upload(
-        client, collection_id, "leave.csv", LEAVE_CSV, "application/octet-stream"
+    doc_id = await upload_document(
+        client, collection_id, "leave.csv", LEAVE_CSV, content_type="application/octet-stream"
     )
 
-    listed = await client.get(f"/collections/{collection_id}/documents")
-    entry = next(d for d in listed.json()["items"] if d["id"] == doc_id)
+    entry = await get_document(client, collection_id, doc_id)
     assert entry["status"] == "ready"
     assert entry["chunk_count"] > 0

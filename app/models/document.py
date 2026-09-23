@@ -3,7 +3,18 @@ from datetime import UTC, datetime
 from enum import StrEnum
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Boolean, Column, Computed, DateTime, ForeignKey, Index, String, Text, text
+from sqlalchemy import (
+    Boolean,
+    Column,
+    Computed,
+    DateTime,
+    ForeignKey,
+    Index,
+    LargeBinary,
+    String,
+    Text,
+    text,
+)
 from sqlalchemy.dialects.postgresql import TSVECTOR
 from sqlmodel import Field, SQLModel
 
@@ -88,6 +99,18 @@ class Document(SQLModel, table=True):
         default_factory=_utcnow, sa_column=Column(DateTime(timezone=True), nullable=False)
     )
     error_message: str | None = None
+    # The uploaded bytes, held here only between UPLOADED and a terminal
+    # status. Ingestion is no longer synchronous with the request that
+    # created this row — a worker process, not the API handler, reads this
+    # column when it claims the document — so the bytes have to live
+    # somewhere durable a *different* process can reach. Postgres, not a
+    # filesystem or object store: it is already the platform's one hard
+    # dependency, and nothing here approaches a scale where that stops being
+    # the simpler answer. Cleared (set to `None`) the moment processing
+    # reaches READY or FAILED — once chunked or abandoned, keeping the
+    # original bytes around serves no further purpose and only grows the
+    # table.
+    raw_content: bytes | None = Field(default=None, sa_column=Column(LargeBinary, nullable=True))
 
 
 class DocumentChunk(SQLModel, table=True):

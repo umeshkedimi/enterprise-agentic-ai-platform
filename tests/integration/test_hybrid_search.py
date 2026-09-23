@@ -11,7 +11,6 @@ coincidence — the same query and documents, with hybrid search turned off,
 demonstrably return the wrong document first.
 """
 
-import io
 import uuid
 
 import pytest
@@ -19,7 +18,7 @@ import pytest
 from app.core.config import get_settings
 from app.db.session import async_session_factory
 from app.services.retrieval_service import semantic_search
-from tests.integration.conftest import create_collection
+from tests.integration.conftest import create_collection, upload_document
 
 TARGET_TEXT = (
     b"Reference RX2291 reimbursement addendum covering miscellaneous equipment "
@@ -42,22 +41,13 @@ def hybrid_search_toggle(monkeypatch):
     get_settings.cache_clear()
 
 
-async def _upload(client, collection_id: str, filename: str, body: bytes) -> str:
-    r = await client.post(
-        f"/collections/{collection_id}/documents",
-        files={"file": (filename, io.BytesIO(body), "text/plain")},
-    )
-    assert r.status_code == 201, r.text
-    return r.json()["id"]
-
-
 async def test_hybrid_search_rescues_the_document_the_query_actually_names(
     authed_client, fake_embeddings
 ):
     client, _ = authed_client
     collection_id = await create_collection(client, "hr")
-    await _upload(client, collection_id, "target.txt", TARGET_TEXT)
-    await _upload(client, collection_id, "decoy.txt", DECOY_TEXT)
+    await upload_document(client, collection_id, "target.txt", TARGET_TEXT)
+    await upload_document(client, collection_id, "decoy.txt", DECOY_TEXT)
 
     async with async_session_factory() as session:
         chunks = await semantic_search(
@@ -77,8 +67,8 @@ async def test_disabling_hybrid_search_reverts_to_the_wrong_answer(
     scenario was designed (and checked in Python) to do."""
     client, _ = authed_client
     collection_id = await create_collection(client, "hr")
-    await _upload(client, collection_id, "target.txt", TARGET_TEXT)
-    await _upload(client, collection_id, "decoy.txt", DECOY_TEXT)
+    await upload_document(client, collection_id, "target.txt", TARGET_TEXT)
+    await upload_document(client, collection_id, "decoy.txt", DECOY_TEXT)
 
     hybrid_search_toggle(False)
 
@@ -100,7 +90,7 @@ async def test_every_returned_score_is_real_cosine_similarity_not_a_fused_number
     search exists."""
     client, _ = authed_client
     collection_id = await create_collection(client, "hr")
-    await _upload(client, collection_id, "target.txt", TARGET_TEXT)
+    await upload_document(client, collection_id, "target.txt", TARGET_TEXT)
 
     async with async_session_factory() as session:
         chunks = await semantic_search(
@@ -124,8 +114,8 @@ async def test_the_benchmark_harness_shows_the_same_rescue(
     whether the right document is #1."""
     client, _ = authed_client
     collection_id = await create_collection(client, "hr")
-    doc_id = await _upload(client, collection_id, "target.txt", TARGET_TEXT)
-    await _upload(client, collection_id, "decoy.txt", DECOY_TEXT)
+    doc_id = await upload_document(client, collection_id, "target.txt", TARGET_TEXT)
+    await upload_document(client, collection_id, "decoy.txt", DECOY_TEXT)
 
     golden = await client.post(
         f"/collections/{collection_id}/golden-examples",
