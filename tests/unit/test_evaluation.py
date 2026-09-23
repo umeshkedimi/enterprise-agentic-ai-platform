@@ -154,6 +154,73 @@ def test_a_claim_supported_by_no_source_is_not_supported():
     assert service._score(claims)[0] == pytest.approx(1 / 3)
 
 
+def test_a_claim_whose_number_appears_in_no_source_is_not_supported():
+    """The other half of the incident above, closed a chunk later: an
+    answer's own arithmetic ("25 × 3/5 = 15 days") credited to a source that
+    only ever said "pro-rata". A source and a supported flag from the judge
+    are not enough on their own — the number still has to actually be there.
+    """
+    sources = [(1, "policy.pdf", "Part-time staff receive a pro-rata share of full-time leave.")]
+    claims = service._normalise_claims(
+        [{"claim": "Part-time staff get 15 days of leave.", "supported": True, "sources": [1]}],
+        limit=10,
+    )
+
+    claims = service._apply_numeric_verification(claims, sources)
+
+    assert claims[0]["supported"] is False
+    assert claims[0]["unverified_numbers"] == ["15"]
+
+
+def test_a_number_spelled_out_in_the_source_still_verifies():
+    """A source writing "twenty-five days" must not look, to a purely
+    digit-based check, like it never mentioned the number a claim in digits
+    actually relies on."""
+    sources = [(1, "policy.pdf", "Full-time staff accrue twenty-five days of leave.")]
+    claims = service._normalise_claims(
+        [{"claim": "Full-time staff get 25 days.", "supported": True, "sources": [1]}], limit=10
+    )
+
+    claims = service._apply_numeric_verification(claims, sources)
+
+    assert claims[0]["supported"] is True
+    assert "unverified_numbers" not in claims[0]
+
+
+def test_a_claim_with_no_numbers_is_never_touched():
+    sources = [(1, "policy.pdf", "Some unrelated text.")]
+    claims = service._normalise_claims(
+        [{"claim": "Employees may request leave in advance.", "supported": True, "sources": [1]}],
+        limit=10,
+    )
+
+    assert service._apply_numeric_verification(claims, sources) == claims
+
+
+def test_an_already_unsupported_claim_is_left_alone():
+    """Nothing to downgrade, and nothing here should be read as vouching for
+    it either — the claim passes through exactly as given."""
+    sources = [(1, "policy.pdf", "no numbers here")]
+    claims = [{"claim": "employees get 15 days", "supported": False, "sources": []}]
+
+    assert service._apply_numeric_verification(claims, sources) == claims
+
+
+def test_a_number_verified_by_a_different_cited_source_still_counts():
+    sources = [
+        (1, "a.pdf", "Some unrelated policy text with no numbers."),
+        (2, "b.pdf", "Full-time staff accrue 25 days of leave."),
+    ]
+    claims = service._normalise_claims(
+        [{"claim": "Full-time staff get 25 days.", "supported": True, "sources": [1, 2]}],
+        limit=10,
+    )
+
+    result = service._apply_numeric_verification(claims, sources)
+
+    assert result[0]["supported"] is True
+
+
 # --- What the judge is shown -------------------------------------------------
 
 

@@ -98,7 +98,8 @@ anything not built is under the explicitly-marked backlog below.
 Federated auth (OIDC/SSO) · queued and scheduled evaluation runs (the harness is synchronous today,
 and idempotent, which is what would make a queue easy to add) · alert rules and SLOs · OAuth for
 MCP servers (bearer tokens only) · per-tenant usage rollup · Kubernetes manifests · static type
-checking · deterministic numeric-claim verification for the evaluation judge.
+checking · judge-vs-human validation (the deterministic numeric check closes one specific,
+observed failure mode; whether the judge agrees with a human rater in general is still unmeasured).
 
 One deliberate non-item: retrieval still has no relevance-score floor. It is now *measurable* rather
 than guessable — see [Evaluation](#evaluation) — but choosing a threshold trades ungrounded answers
@@ -746,6 +747,13 @@ Request/response contracts: `app/models/schemas.py`.
 - **An abstention has no groundedness.** It is stored as a null score and counted by verdict, not
   folded into the average as a 1.0 — which would let a retriever that finds nothing report a
   flawless platform.
+- **A number in a claim is checked deterministically, not trusted to the judge's own self-report.**
+  A live run once produced an answer that computed "25 × 3/5 = 15 days" from a source that only said
+  "pro-rata", and the judge credited the arithmetic to the source anyway. Asking a model to police its
+  own arithmetic is the same unreliable self-report the platform already refuses to trust for a
+  score, so a claim the judge marks supported is downgraded in code if a number in it — digit or
+  spelled out — appears in none of the sources it actually cites. This can only ever move a score
+  down, and it only runs on claims the judge already marked supported.
 - **Serving and evaluation are separate workloads on the metrics.** The judge deliberately shares
   `complete()` so it cannot become a workload nobody counts, which leaves latency the one thing that
   must be told apart: its long, unhurried calls would otherwise move the p95 an operator pages on

@@ -315,6 +315,19 @@ EVALUATION_SCORE = Histogram(
     registry=REGISTRY,
 )
 
+# How often the deterministic numeric check (app/services/numeric_verification.py)
+# disagrees with the judge — a claim the judge called supported, downgraded
+# because a number in it appears in none of the sources it actually cited.
+# No labels: this is one platform-wide check, not a per-agent or per-tenant
+# signal, and there is nothing bounded to key it by. A rising rate here is a
+# reading on the judge itself — how often it would have flattered an answer's
+# own arithmetic if this were the only check.
+EVALUATION_NUMERIC_OVERRIDES = Counter(
+    "eaap_evaluation_numeric_overrides_total",
+    "Judge-supported claims downgraded because a number in them wasn't found in their sources.",
+    registry=REGISTRY,
+)
+
 
 def tool_label(name: str, *, remote: bool) -> str:
     """The bounded label for a tool that ran. See `TOOL_LABEL_REMOTE`."""

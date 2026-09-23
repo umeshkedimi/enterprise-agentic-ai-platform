@@ -306,6 +306,12 @@ class EvaluationClaim(BaseModel):
     # The source numbers carrying the claim, as numbered in the answer's own
     # citations. Empty when nothing carried it.
     sources: list[int]
+    # Present only when the deterministic numeric check downgraded this claim
+    # from what the judge itself returned — a number in the claim that
+    # appeared, digit or spelled out, in none of the sources it cites. Empty
+    # for the common case: most claims have no numbers, or the judge already
+    # marked them unsupported for an unrelated reason.
+    unverified_numbers: list[str] = []
 
 
 class EvaluationRunRequest(BaseModel):

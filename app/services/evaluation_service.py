@@ -48,6 +48,7 @@ from app.services.errors import (
     NotFoundError,
 )
 from app.services.evaluation_prompts import AUDIT_RUBRIC, build_audit_request, parse_audit_response
+from app.services.numeric_verification import unverified_numbers
 
 logger = get_logger(__name__)
 
@@ -282,6 +283,35 @@ def _normalise_claims(raw: Sequence[Any], *, limit: int) -> list[dict]:
     return claims
 
 
+def _apply_numeric_verification(
+    claims: list[dict], sources: Sequence[tuple[int, str, str]]
+) -> list[dict]:
+    """Downgrade a judge-supported claim if a number in it can't be found in
+    anything it actually cites — the deterministic half of the fix for the
+    incident `app/services/numeric_verification.py` documents. Applied after
+    the judge, not instead of it: deciding whether a sentence is a genuine
+    claim at all is still the judge's harder job, and this only re-checks the
+    one part of "supported" that doesn't require trusting a model's
+    self-report, because the platform can check it directly.
+
+    Never runs on a claim already marked unsupported — it has nothing to
+    downgrade, and nothing here should be read as vouching for it either.
+    """
+    text_by_number = {number: text for number, _, text in sources}
+    verified: list[dict] = []
+    for claim in claims:
+        if not claim["supported"]:
+            verified.append(claim)
+            continue
+        cited_texts = [text_by_number[n] for n in claim["sources"] if n in text_by_number]
+        bad_numbers = unverified_numbers(claim["claim"], cited_texts)
+        if bad_numbers:
+            claim = {**claim, "supported": False, "unverified_numbers": bad_numbers}
+            metrics.EVALUATION_NUMERIC_OVERRIDES.inc()
+        verified.append(claim)
+    return verified
+
+
 def _score(claims: Sequence[dict]) -> tuple[float | None, str]:
     """Turn the claim list into a score and a verdict, deterministically."""
     if not claims:
@@ -384,6 +414,7 @@ async def evaluate_message(
             raise EvaluationFailedError(str(exc)) from exc
 
         claims = _normalise_claims(payload["claims"], limit=settings.evaluation_max_claims)
+        claims = _apply_numeric_verification(claims, evidence.sources)
         score, verdict = _score(claims)
         tracing.set_attributes(
             current,

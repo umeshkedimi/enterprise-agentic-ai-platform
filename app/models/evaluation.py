@@ -62,7 +62,16 @@ VERDICTS = (VERDICT_SUPPORTED, VERDICT_PARTIAL, VERDICT_UNSUPPORTED, VERDICT_ABS
 # the first is additionally enforced platform-side — a claim marked supported
 # while naming no source is not supported. Scores under v1 and v2 are not
 # comparable, which is exactly what this constant is for.
-RUBRIC_VERSION = "v2"
+#
+# v3: the second half of that same incident — an answer's own arithmetic
+# credited to a source that never stated the result — is now caught
+# deterministically rather than left to the rubric's wording alone. A claim
+# the judge marks supported is downgraded if a number in it doesn't appear,
+# digit or spelled out, in anything it actually cites (see
+# app/services/numeric_verification.py). This can only ever move a score
+# down, never up, but it is still a change in what "supported" means, so v2
+# and v3 rows are not comparable either.
+RUBRIC_VERSION = "v3"
 
 
 def _utcnow() -> datetime:

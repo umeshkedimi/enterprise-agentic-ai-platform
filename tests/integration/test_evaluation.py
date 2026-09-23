@@ -231,6 +231,98 @@ async def test_a_partly_grounded_answer_records_which_half_failed(
     assert failed[0]["claim"] == "Leave carries over indefinitely."
 
 
+# --- Deterministic numeric verification (the "25 × 3/5 = 15 days" incident) --
+
+
+async def test_a_derived_number_the_judge_credits_is_caught_deterministically(
+    authed_client, fake_embeddings, provider_creds, scripted_provider
+):
+    """The exact incident this check exists for, reproduced end to end: the
+    handbook never states a part-time figure, the answer computes one anyway,
+    and the judge — scripted here to reproduce the v1 bug on purpose, by
+    marking it supported — is overruled by the platform rather than trusted."""
+    client, _ = authed_client
+    agent_id, conversation_id, message_id = await served_turn(
+        client, scripted_provider, answer="Part-time staff get 15 days, pro-rated [1]."
+    )
+
+    scripted_provider.queue.append(
+        judge_reply(
+            {
+                "claims": [
+                    {
+                        "claim": "Part-time staff get 15 days.",
+                        "supported": True,
+                        "sources": [1],
+                    }
+                ],
+                "notes": "The source supports a pro-rata calculation.",
+            }
+        )
+    )
+    r = await client.post(evaluation_url(agent_id, conversation_id, message_id))
+
+    body = r.json()
+    assert body["verdict"] == "unsupported"
+    assert body["score"] == 0.0
+    assert body["claims"][0]["unverified_numbers"] == ["15"]
+
+
+async def test_a_number_matching_the_sources_spelled_out_form_stays_supported(
+    authed_client, fake_embeddings, provider_creds, scripted_provider
+):
+    """The handbook spells its numbers out ("twenty-five days"); an answer
+    giving the same fact in digits must not be penalised just because a
+    purely digit-based check would miss the match."""
+    client, _ = authed_client
+    agent_id, conversation_id, message_id = await served_turn(
+        client, scripted_provider, answer="Staff get 25 days [1]."
+    )
+
+    scripted_provider.queue.append(
+        judge_reply(
+            {"claims": [{"claim": "Staff get 25 days.", "supported": True, "sources": [1]}]}
+        )
+    )
+    r = await client.post(evaluation_url(agent_id, conversation_id, message_id))
+
+    body = r.json()
+    assert body["verdict"] == "supported"
+    assert body["score"] == 1.0
+    assert body["claims"][0]["unverified_numbers"] == []
+
+
+async def test_the_numeric_override_is_counted_separately_from_the_judges_own_verdict(
+    authed_client, fake_embeddings, provider_creds, scripted_provider
+):
+    client, _ = authed_client
+    agent_id, conversation_id, message_id = await served_turn(
+        client, scripted_provider, answer="Part-time staff get 15 days, pro-rated [1]."
+    )
+
+    def overrides() -> float:
+        return metrics.REGISTRY.get_sample_value("eaap_evaluation_numeric_overrides_total") or 0.0
+
+    before = overrides()
+
+    scripted_provider.queue.append(
+        judge_reply(
+            {
+                "claims": [
+                    {
+                        "claim": "Part-time staff get 15 days.",
+                        "supported": True,
+                        "sources": [1],
+                    }
+                ]
+            }
+        )
+    )
+    await client.post(evaluation_url(agent_id, conversation_id, message_id))
+
+    assert overrides() - before == 1
+
+
 async def test_an_abstention_scores_null_and_is_not_a_failure(
     authed_client, fake_embeddings, provider_creds, scripted_provider
 ):
